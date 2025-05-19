@@ -815,7 +815,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 def main():
     """Main function to start the bot"""
     # Print starting message
-    print("Starting Green-Boy...")
+    print("Starting Green-Boy created by adamlaho")
     
     # Set up the event loop explicitly
     loop = asyncio.new_event_loop()
