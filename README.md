@@ -1,6 +1,6 @@
 # Green-Boy 🤖
 
-A lightweight Telegram bot for SLURM job monitoring with enhanced resource usage monitoring capabilities.
+![AMLP Logo](green_boy_logo.png)
 
 ## Features
 
