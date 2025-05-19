@@ -1,5 +1,30 @@
 ![AMLP Logo](green_boy_logo.png)
 
+## ⚠️ **IMPORTANT DISCLAIMER**
+
+**USE AT YOUR OWN RISK**
+
+This bot can perform destructive operations on your SLURM cluster, including:
+- **Canceling running jobs** (potentially causing data loss)
+- **Submitting new jobs** (consuming cluster resources)
+- **Accessing job information** (potential privacy implications)
+
+**By using Green-Boy, you acknowledge that:**
+- ❌ **The authors are NOT responsible** for any job failures, data loss, cluster disruptions, or other problems caused by using this bot
+- 🔒 **You are solely responsible** for properly configuring authorization and securing access
+- 🧪 **You should test thoroughly** in a safe environment before using in production
+- 📋 **You must comply** with your organization's policies and cluster usage guidelines
+- 🔐 **You assume full liability** for all actions performed through this bot
+
+**Recommendations:**
+- Always test with non-critical jobs first
+- Use the authorization system to restrict access
+- Monitor bot activity and logs regularly
+- Have backups of important data
+- Coordinate with your cluster administrators
+
+---
+
 ## Features
 
 🚀 **Job Management**
@@ -94,6 +119,7 @@ To find your Telegram user ID:
 | `/jobinfo <JOBID>` | Show detailed job info with resource usage | `/jobinfo 12345678` |
 | `/status` | Show overall cluster status | `/status` |
 | `/submit <script>` | Submit a job script | `/submit /path/to/job.sh` |
+| `/shutdown` | 🔴 Safely shutdown the bot (authorized users only) | `/shutdown` |
 
 ### Interactive Features
 
@@ -102,6 +128,7 @@ The bot includes interactive buttons for common actions:
 - **Queue Filters**: Quick buttons to filter jobs (All, Running, Pending, GPU)
 - **Job Actions**: Cancel jobs directly from job information
 - **Resource Details**: View detailed CPU and memory usage for running jobs
+- **Bot Management**: Shutdown button for authorized users
 
 ### Examples
 
@@ -133,6 +160,11 @@ The bot includes interactive buttons for common actions:
 **Submit a job script:**
 ```
 /submit /home/user/my_job.sh
+```
+
+**Shutdown the bot remotely:**
+```
+/shutdown
 ```
 
 ## Resource Monitoring
@@ -192,10 +224,17 @@ ps aux | grep green-boy.py
 
 ## Security Considerations
 
-- **Authorization**: Use `GREENBOY_AUTH_USERS` to restrict access to specific users
+⚠️ **Critical Security Notice:**
+- **Always configure authorization**: Set `GREENBOY_AUTH_USERS` to restrict access
+- **Monitor bot usage**: Review logs regularly for unauthorized access
+- **Secure your token**: Keep your `TELEGRAM_BOT_TOKEN` secret
+- **Test permissions**: Ensure bot users only have appropriate SLURM access
+- **Network security**: Consider firewall restrictions and VPN access
+
+Additional security measures:
 - **Permissions**: The bot runs with the permissions of the user executing it
-- **Network**: Consider running on a secure network or using VPN
 - **Logs**: Monitor logs for unauthorized access attempts
+- **Cluster coordination**: Inform cluster administrators about bot deployment
 
 ## Troubleshooting
 
@@ -204,10 +243,10 @@ ps aux | grep green-boy.py
 If your bot isn't responding or you're getting webhook conflicts, use the included cleanup script:
 
 ```bash
-python3 clean_bot.py
+python3 cleanup_bot.py
 ```
 
-**When to use `clean_bot.py`:**
+**When to use `cleanup_bot.py`:**
 - 🔄 Bot was previously running in webhook mode
 - 🚫 Bot not responding to commands
 - ⚠️ Getting "webhook already set" errors
@@ -226,6 +265,13 @@ python3 clean_bot.py
 3. Wait 10-15 seconds
 4. Start your bot normally
 
+### Process Management
+
+Check for existing bot processes:
+```bash
+python3 check_processes.py
+```
+
 ### Common Issues
 
 **Bot doesn't respond:**
@@ -242,6 +288,11 @@ python3 clean_bot.py
 - Check if your user ID is in `GREENBOY_AUTH_USERS`
 - Get your user ID from [@userinfobot](https://t.me/userinfobot)
 
+**Webhook conflicts:**
+- Run `python3 cleanup_bot.py`
+- Wait before restarting the bot
+- Check for multiple bot instances
+
 ### Logging
 
 The bot logs activities to stdout. To save logs:
@@ -255,6 +306,7 @@ python3 green-boy.py > green-boy.log 2>&1
 - **Python packages**:
   - `python-telegram-bot`
   - `requests`
+  - `psutil` (for process management)
 - **System tools**:
   - `squeue`, `scontrol`, `sstat`, `sacct` (SLURM tools)
 - **Permissions**:
@@ -270,12 +322,24 @@ Feel free to submit issues, feature requests, or pull requests. Some areas for i
 - Job performance analytics
 - Email notifications integration
 - Web dashboard
+- Enhanced security features
 
 ## License
 
-This project is provided as-is for educational and research purposes. Please ensure compliance with your organization's policies when using on shared systems.
+This project is provided as-is under the MIT License for educational and research purposes. 
+
+**DISCLAIMER: THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.**
+
+Please ensure compliance with your organization's policies when using on shared systems.
 
 ## Changelog
+
+### v1.1
+- Added remote shutdown functionality
+- Enhanced job cancellation with improved error handling
+- Better conflict resolution and startup reliability
+- Process management tools (cleanup_bot.py, check_processes.py)
+- Improved security with triple authorization checks
 
 ### v1.0
 - Initial release
@@ -287,3 +351,5 @@ This project is provided as-is for educational and research purposes. Please ens
 ---
 
 *Green-Boy - Making SLURM monitoring more accessible, one message at a time! 🌱*
+
+**Remember: With great power comes great responsibility. Use Green-Boy wisely!** ⚡
