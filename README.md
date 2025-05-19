@@ -35,10 +35,10 @@ A lightweight Telegram bot for SLURM job monitoring with enhanced resource usage
 
 ### Setup
 
-1. **Clone or download the script**
+1. **Clone the repository**
    ```bash
-   curl -O https://your-server/green-boy.py
-   chmod +x green-boy.py
+   git clone https://github.com/al9500/green-boy.git
+   cd green-boy
    ```
 
 2. **Install required Python packages**
@@ -51,7 +51,7 @@ A lightweight Telegram bot for SLURM job monitoring with enhanced resource usage
    - Use `/newbot` command and follow instructions
    - Save the bot token
 
-4. **Configure environment variables (in your .bashrc)**
+4. **Configure environment variables**
    ```bash
    export TELEGRAM_BOT_TOKEN="your_bot_token_here"
    export GREENBOY_AUTH_USERS="123456789,987654321"  # Optional: comma-separated user IDs
@@ -191,6 +191,30 @@ python3 green-boy.py
 # Using tmux
 tmux new-session -d -s green-boy 'python3 green-boy.py'
 ```
+
+### Using Aliases (Quick Commands)
+
+You can also create convenient aliases for starting and stopping the bot:
+
+```bash
+# Add these to your ~/.bashrc or ~/.zshrc
+alias green-boy-start='nohup nice -n 19 python3 /path/to/green-boy/green-boy.py &'
+alias green-boy-kill='pkill -f green-boy.py'
+```
+
+Then use them like:
+```bash
+# Start the bot (low priority, background)
+green-boy-start
+
+# Stop the bot
+green-boy-kill
+
+# Check if it's running
+ps aux | grep green-boy.py
+```
+
+**Note:** Update the path `/path/to/green-boy/green-boy.py` to match your installation directory.
 
 ## Security Considerations
 
