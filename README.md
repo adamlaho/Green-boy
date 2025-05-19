@@ -1,5 +1,3 @@
-# Green-Boy 
-
 ![Green Boy Logo](green_boy_logo.png)
 
 ## Features
