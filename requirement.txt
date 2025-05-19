@@ -1,0 +1,14 @@
+# Green-Boy SLURM Telegram Bot Requirements
+# Core dependencies for the bot functionality
+
+# Telegram Bot API framework (async version)
+python-telegram-bot>=20.0,<21.0
+
+# HTTP requests library for API calls
+requests>=2.25.0
+
+# Optional: For better async performance (recommended)
+httpx>=0.24.0
+
+# Optional: For enhanced logging and monitoring
+coloredlogs>=15.0
