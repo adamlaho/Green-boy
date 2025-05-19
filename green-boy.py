@@ -8,8 +8,12 @@ import subprocess
 import logging
 import sys
 import asyncio
+import re
+import signal
+import time
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, CallbackQueryHandler
+from telegram.error import Conflict, NetworkError
 
 # ─── Configuration ──────────────────────────────────────────────────────────────
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -44,9 +48,12 @@ def run_slurm_command(cmd: list[str]) -> tuple[bool, str]:
     try:
         logger.debug(f"Running command: {' '.join(cmd)}")
         result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        logger.debug(f"Command succeeded. Output: {result.stdout}")
         return True, result.stdout or "(command completed successfully)"
     except subprocess.CalledProcessError as e:
-        logger.exception(f"Command {' '.join(cmd)} failed")
+        logger.error(f"Command {' '.join(cmd)} failed with return code {e.returncode}")
+        logger.error(f"STDOUT: {e.stdout}")
+        logger.error(f"STDERR: {e.stderr}")
         error = e.stderr.strip() or str(e)
         return False, f"Error: {error}"
 
@@ -315,6 +322,26 @@ def get_cluster_status() -> str:
         return "Error retrieving cluster status."
     return output
 
+def cleanup_on_exit():
+    """Clean up when the bot is shutting down."""
+    print("Bot shutting down...")
+    try:
+        import requests
+        requests.post(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook",
+            json={"drop_pending_updates": True},
+            timeout=5
+        )
+        print("Webhook cleared on exit")
+    except Exception as e:
+        print(f"Could not clear webhook on exit: {e}")
+
+def signal_handler(signum, frame):
+    """Handle shutdown signals gracefully."""
+    print(f"\nReceived signal {signum}, shutting down gracefully...")
+    cleanup_on_exit()
+    sys.exit(0)
+
 def paginate_lines(text: str, max_chars: int):
     """
     Yield chunks of `text` (by lines) each under max_chars.
@@ -367,14 +394,23 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/cancel <JOBID> - cancel that job\n"
         "/jobinfo <JOBID> - show detailed job information with resource usage\n"
         "/status - show overall cluster status\n"
-        "/submit <script> - submit a job script\n\n"
+        "/submit <script> - submit a job script\n"
+        "/shutdown - safely shutdown the bot 🔒\n\n"
         "Examples:\n"
         "• `/squeue -p gpu` - jobs on the gpu partition\n"
         "• `/squeue -t PD` - pending jobs\n"
         "• `/cancel 60489632` - cancel job 60489632\n"
         "• `/jobinfo 60489632` - show details and resource usage for job 60489632\n"
     )
-    await update.message.reply_text(help_text, parse_mode="Markdown")
+    
+    # Add shutdown button for authorized users
+    keyboard = []
+    user_id = update.effective_user.id
+    if is_authorized(user_id):
+        keyboard.append([InlineKeyboardButton("🔴 Shutdown Bot", callback_data="shutdown_confirm")])
+    
+    reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
+    await update.message.reply_text(help_text, parse_mode="Markdown", reply_markup=reply_markup)
 
 async def squeue_command_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Authorization wrapper for squeue command"""
@@ -417,19 +453,55 @@ async def cancel_command_wrapper(update: Update, context: ContextTypes.DEFAULT_T
 
 async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    /cancel <JOBID>  — uses `scontrol cancel JOBID`
+    /cancel <JOBID>  — uses scancel for more reliable job cancellation
     """
     if not context.args:
         await update.message.reply_text("Usage: /cancel <JOBID>")
         return
 
     jobid = context.args[0]
-    success, output = run_slurm_command(["scontrol", "cancel", jobid])
+    
+    # Clean the job ID to extract just the numeric part
+    # This handles cases like "12345_0" or "12345.batch"
+    clean_jobid = re.match(r'(\d+)', jobid)
+    if clean_jobid:
+        clean_jobid = clean_jobid.group(1)
+    else:
+        await update.message.reply_text(f"❌ Invalid job ID format: {jobid}")
+        return
+    
+    # First, verify the job exists and belongs to the user
+    job_details = get_job_details(clean_jobid)
+    if "Error" in job_details:
+        await update.message.reply_text(f"❌ Job {jobid} not found or access denied.")
+        return
+    
+    # Try scancel first (more reliable)
+    success, output = run_slurm_command(["scancel", clean_jobid])
+    
+    # If scancel fails, try scontrol cancel as fallback
+    if not success:
+        success, output = run_slurm_command(["scontrol", "cancel", clean_jobid])
     
     if success:
-        await update.message.reply_text(f"✅ Job {jobid} cancelled.")
+        # Get job name for confirmation
+        job_name = job_details.get("JobName", "Unknown")
+        await update.message.reply_text(
+            f"✅ Job {jobid} ({job_name}) cancelled successfully."
+        )
     else:
-        await update.message.reply_text(f"❌ Error cancelling job {jobid}:\n{output}")
+        # Provide more detailed error information
+        job_state = job_details.get("JobState", "Unknown")
+        error_msg = f"❌ Error cancelling job {jobid}:\n{output}\n\n"
+        error_msg += f"Job State: {job_state}\n"
+        
+        # Add helpful context based on job state
+        if job_state in ["COMPLETED", "CANCELLED", "FAILED"]:
+            error_msg += "ℹ️ Note: This job has already finished and cannot be cancelled."
+        elif job_state == "PENDING":
+            error_msg += "ℹ️ Note: If cancellation failed, the job might have already started running."
+        
+        await update.message.reply_text(error_msg)
 
 async def jobinfo_command_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Authorization wrapper for jobinfo command"""
@@ -553,7 +625,15 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     status = get_cluster_status()
     
     formatted = f"🖥️ *Cluster Status*\n\n<pre>{status}</pre>"
-    await update.message.reply_text(formatted, parse_mode="HTML")
+    
+    # Add shutdown button for authorized users
+    keyboard = []
+    user_id = update.effective_user.id
+    if is_authorized(user_id):
+        keyboard.append([InlineKeyboardButton("🔴 Shutdown Bot", callback_data="shutdown_confirm")])
+    
+    reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
+    await update.message.reply_text(formatted, parse_mode="HTML", reply_markup=reply_markup)
 
 async def submit_command_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Authorization wrapper for submit command"""
@@ -593,6 +673,44 @@ async def submit_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await update.message.reply_text(msg)
     else:
         await update.message.reply_text(f"❌ Error submitting job:\n{output}")
+
+async def shutdown_command_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Authorization wrapper for shutdown command"""
+    await auth_wrapper(update, context, shutdown_command)
+
+async def shutdown_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /shutdown - safely shutdown the bot (authorized users only)
+    """
+    # Double-check authorization (extra security for shutdown)
+    user_id = update.effective_user.id
+    if not is_authorized(user_id):
+        await update.message.reply_text("⛔ You are not authorized to shutdown the bot.")
+        logger.warning(f"Unauthorized shutdown attempt by user {user_id}")
+        return
+    
+    # Get user info for logging
+    user_info = update.effective_user.username or update.effective_user.first_name or str(user_id)
+    
+    # Send confirmation message with buttons
+    keyboard = [
+        [
+            InlineKeyboardButton("✅ Yes, Shutdown", callback_data="shutdown_execute"),
+            InlineKeyboardButton("❌ Cancel", callback_data="shutdown_cancel")
+        ]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await update.message.reply_text(
+        f"🔴 *Bot Shutdown Confirmation*\n\n"
+        f"User: @{user_info}\n"
+        f"PID: {os.getpid()}\n\n"
+        f"Are you sure you want to shutdown the Green-Boy bot?\n\n"
+        f"⚠️ *Warning*: This will stop the bot completely. "
+        f"You'll need to restart it manually on the cluster.",
+        parse_mode="Markdown",
+        reply_markup=reply_markup
+    )
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle button callbacks from inline keyboards."""
@@ -647,21 +765,141 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                     parse_mode="HTML"
                 )
     
-    # Handle cancel job button
+    # Handle cancel job button (improved version)
     elif data.startswith("cancel_"):
         job_id = data.split("_")[1]
-        success, output = run_slurm_command(["scontrol", "cancel", job_id])
+        
+        # Clean the job ID to extract just the numeric part
+        clean_jobid = re.match(r'(\d+)', job_id)
+        if clean_jobid:
+            clean_jobid = clean_jobid.group(1)
+        else:
+            await query.edit_message_text(
+                f"❌ Invalid job ID format: {job_id}",
+                parse_mode="Markdown"
+            )
+            return
+        
+        # First verify the job exists
+        job_details = get_job_details(clean_jobid)
+        if "Error" in job_details:
+            await query.edit_message_text(
+                f"❌ Job {job_id} not found or access denied.",
+                parse_mode="Markdown"
+            )
+            return
+        
+        # Try scancel first, then scontrol cancel as fallback
+        success, output = run_slurm_command(["scancel", clean_jobid])
+        if not success:
+            success, output = run_slurm_command(["scontrol", "cancel", clean_jobid])
         
         if success:
+            job_name = job_details.get("JobName", "Unknown")
             await query.edit_message_text(
-                f"✅ Job {job_id} cancelled successfully.",
+                f"✅ Job {job_id} ({job_name}) cancelled successfully.",
                 parse_mode="Markdown"
             )
         else:
+            job_state = job_details.get("JobState", "Unknown")
+            error_msg = f"❌ Error cancelling job {job_id}:\n{output}\n\n"
+            error_msg += f"Job State: {job_state}"
+            
+            if job_state in ["COMPLETED", "CANCELLED", "FAILED"]:
+                error_msg += "\n\nℹ️ Note: This job has already finished."
+            
             await query.edit_message_text(
-                f"❌ Error cancelling job {job_id}:\n{output}",
+                error_msg,
                 parse_mode="Markdown"
             )
+    
+    # Handle shutdown confirmation button
+    elif data == "shutdown_confirm":
+        # Double-check authorization (extra security)
+        user_id = update.effective_user.id
+        if not is_authorized(user_id):
+            await query.edit_message_text("⛔ You are not authorized to shutdown the bot.")
+            return
+        
+        # Get user info for logging
+        user_info = update.effective_user.username or update.effective_user.first_name or str(user_id)
+        
+        # Show confirmation with buttons
+        keyboard = [
+            [
+                InlineKeyboardButton("✅ Yes, Shutdown", callback_data="shutdown_execute"),
+                InlineKeyboardButton("❌ Cancel", callback_data="shutdown_cancel")
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            f"🔴 *Bot Shutdown Confirmation*\n\n"
+            f"User: @{user_info}\n"
+            f"PID: {os.getpid()}\n\n"
+            f"Are you sure you want to shutdown the Green-Boy bot?\n\n"
+            f"⚠️ *Warning*: This will stop the bot completely. "
+            f"You'll need to restart it manually on the cluster.",
+            parse_mode="Markdown",
+            reply_markup=reply_markup
+        )
+    
+    # Handle shutdown execution
+    elif data == "shutdown_execute":
+        # Triple-check authorization (extra security for execution)
+        user_id = update.effective_user.id
+        if not is_authorized(user_id):
+            await query.edit_message_text("⛔ You are not authorized to shutdown the bot.")
+            return
+        
+        # Get user info for logging
+        user_info = update.effective_user.username or update.effective_user.first_name or str(user_id)
+        
+        # Log the shutdown
+        logger.warning(f"Bot shutdown initiated by user {user_info} (ID: {user_id})")
+        
+        # Send final message
+        await query.edit_message_text(
+            f"🔴 *Bot Shutdown Initiated*\n\n"
+            f"Shutting down Green-Boy bot...\n"
+            f"Initiated by: @{user_info}\n"
+            f"Time: {time.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+            f"✅ Bot will terminate in 3 seconds.\n"
+            f"🔄 To restart, run the bot script on the cluster again.",
+            parse_mode="Markdown"
+        )
+        
+        # Give time for the message to be sent
+        await asyncio.sleep(1)
+        
+        # Cleanup and shutdown
+        try:
+            # Clean up webhook
+            import requests
+            requests.post(
+                f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook",
+                json={"drop_pending_updates": True},
+                timeout=5
+            )
+            print("Webhook cleared during shutdown")
+        except Exception as e:
+            print(f"Could not clear webhook during shutdown: {e}")
+        
+        # Stop the application gracefully
+        print(f"Bot shutdown initiated by {user_info}")
+        await context.application.stop()
+        await context.application.shutdown()
+        
+        # Force exit
+        os._exit(0)
+    
+    # Handle shutdown cancellation
+    elif data == "shutdown_cancel":
+        await query.edit_message_text(
+            "✅ *Shutdown Cancelled*\n\n"
+            "The bot will continue running normally.",
+            parse_mode="Markdown"
+        )
     
     # Handle jobinfo button
     elif data.startswith("jobinfo_"):
@@ -814,56 +1052,114 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 def main():
     """Main function to start the bot"""
+    # Register signal handlers for graceful shutdown
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+    
     # Print starting message
     print("Starting Green-Boy created by adamlaho")
+    print(f"Process PID: {os.getpid()}")
     
     # Set up the event loop explicitly
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     
-    # Use subprocess to clean up webhooks without asyncio
-    try:
-        import requests
-        print("Clearing webhook...")
-        requests.post(
-            f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook",
-            json={"drop_pending_updates": True}
-        )
-        print("Webhook cleared successfully")
-    except Exception as e:
-        print(f"Could not clear webhook using requests: {e}")
-        print("Will try clearing webhook during startup")
+    # More aggressive webhook cleanup
+    max_cleanup_attempts = 5
+    for attempt in range(max_cleanup_attempts):
+        try:
+            import requests
+            print(f"Clearing webhook (attempt {attempt + 1}/{max_cleanup_attempts})...")
+            response = requests.post(
+                f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook",
+                json={"drop_pending_updates": True},
+                timeout=10
+            )
+            if response.status_code == 200:
+                print("Webhook cleared successfully")
+                break
+            else:
+                print(f"Webhook clear attempt {attempt + 1} failed: {response.text}")
+        except Exception as e:
+            print(f"Webhook clear attempt {attempt + 1} failed: {e}")
+        
+        if attempt < max_cleanup_attempts - 1:
+            print("Waiting 3 seconds before retry...")
+            time.sleep(3)
     
-    try:
-        # Build application
-        application = ApplicationBuilder().token(BOT_TOKEN).build()
-        
-        # Register command handlers
-        application.add_handler(CommandHandler("start", start_command))
-        application.add_handler(CommandHandler("help", help_command))
-        application.add_handler(CommandHandler("squeue", squeue_command_wrapper))
-        application.add_handler(CommandHandler("cancel", cancel_command_wrapper))
-        application.add_handler(CommandHandler("jobinfo", jobinfo_command_wrapper))
-        application.add_handler(CommandHandler("status", status_command_wrapper))
-        application.add_handler(CommandHandler("submit", submit_command_wrapper))
-        
-        # Register callback query handler for buttons
-        application.add_handler(CallbackQueryHandler(button_callback))
-        
-        # Print startup message
-        print("Green-Boy bot started successfully!")
-        print(f"Authorized users: {AUTHORIZED_USERS if AUTHORIZED_USERS else 'All users allowed'}")
-        print(f"Running with PID: {os.getpid()}")
-        
-        # Run the bot with the simplest possible parameters
-        application.run_polling(drop_pending_updates=True, allowed_updates=["message", "callback_query"])
-        
-    except Exception as e:
-        print(f"ERROR: {e}")
-        import traceback
-        traceback.print_exc()
-        return 1
+    # Wait for API to settle
+    print("Waiting for Telegram API to settle (5 seconds)...")
+    time.sleep(5)
     
+    # Retry mechanism for bot startup
+    max_startup_attempts = 3
+    for startup_attempt in range(max_startup_attempts):
+        try:
+            # Build application
+            application = ApplicationBuilder().token(BOT_TOKEN).build()
+            
+            # Register command handlers
+            application.add_handler(CommandHandler("start", start_command))
+            application.add_handler(CommandHandler("help", help_command))
+            application.add_handler(CommandHandler("squeue", squeue_command_wrapper))
+            application.add_handler(CommandHandler("cancel", cancel_command_wrapper))
+            application.add_handler(CommandHandler("jobinfo", jobinfo_command_wrapper))
+            application.add_handler(CommandHandler("status", status_command_wrapper))
+            application.add_handler(CommandHandler("submit", submit_command_wrapper))
+            application.add_handler(CommandHandler("shutdown", shutdown_command_wrapper))
+            
+            # Register callback query handler for buttons
+            application.add_handler(CallbackQueryHandler(button_callback))
+            
+            # Print startup message
+            print("Green-Boy bot started successfully!")
+            print(f"Authorized users: {AUTHORIZED_USERS if AUTHORIZED_USERS else 'All users allowed'}")
+            print(f"Running with PID: {os.getpid()}")
+            print("Press Ctrl+C to stop the bot")
+            
+            # Run the bot with conflict handling
+            try:
+                application.run_polling(
+                    drop_pending_updates=True, 
+                    allowed_updates=["message", "callback_query"],
+                    close_loop=False  # Don't close the event loop
+                )
+                break  # If we get here, the bot ran successfully
+                
+            except Conflict as e:
+                print(f"Telegram Conflict Error (attempt {startup_attempt + 1}): {e}")
+                if startup_attempt < max_startup_attempts - 1:
+                    print("This usually means another bot instance is running.")
+                    print("Waiting 10 seconds before retry...")
+                    time.sleep(10)
+                else:
+                    print("Maximum startup attempts reached.")
+                    print("Please run the cleanup script and wait a few minutes before trying again.")
+                    return 1
+                    
+            except NetworkError as e:
+                print(f"Network Error (attempt {startup_attempt + 1}): {e}")
+                if startup_attempt < max_startup_attempts - 1:
+                    print("Waiting 5 seconds before retry...")
+                    time.sleep(5)
+                else:
+                    print("Network issues persist. Please check your connection.")
+                    return 1
+                    
+        except Exception as e:
+            print(f"ERROR during startup attempt {startup_attempt + 1}: {e}")
+            import traceback
+            traceback.print_exc()
+            
+            if startup_attempt < max_startup_attempts - 1:
+                print("Waiting 5 seconds before retry...")
+                time.sleep(5)
+            else:
+                print("All startup attempts failed.")
+                return 1
+    
+    # Cleanup on normal exit
+    cleanup_on_exit()
     return 0
 
 if __name__ == "__main__":
