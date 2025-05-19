@@ -1,4 +1,6 @@
-![Green Boy Logo](green_boy_logo.png)
+# Green-Boy 🤖
+
+A lightweight Telegram bot for SLURM job monitoring with enhanced resource usage monitoring capabilities.
 
 ## Features
 
@@ -56,7 +58,6 @@
 
 4. **Configure environment variables**
    ```bash
-   # Add these to your ~/.bashrc or ~/.zshrc
    export TELEGRAM_BOT_TOKEN="your_bot_token_here"
    export GREENBOY_AUTH_USERS="123456789,987654321"  # Optional: comma-separated user IDs
    ```
@@ -199,6 +200,33 @@ ps aux | grep green-boy.py
 - **Logs**: Monitor logs for unauthorized access attempts
 
 ## Troubleshooting
+
+### Bot Cleanup Tool
+
+If your bot isn't responding or you're getting webhook conflicts, use the included cleanup script:
+
+```bash
+python3 clean_bot.py
+```
+
+**When to use `clean_bot.py`:**
+- 🔄 Bot was previously running in webhook mode
+- 🚫 Bot not responding to commands
+- ⚠️ Getting "webhook already set" errors
+- 🔄 Switching from webhook to polling mode
+- 🧹 Bot behaving unexpectedly
+
+**What it does:**
+- Deletes any existing webhooks
+- Clears pending message updates
+- Verifies bot connection
+- Resets the bot to a clean state
+
+**Usage:**
+1. Stop your current bot instance
+2. Run the cleanup script
+3. Wait 10-15 seconds
+4. Start your bot normally
 
 ### Common Issues
 
