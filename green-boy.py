@@ -1057,7 +1057,7 @@ def main():
     signal.signal(signal.SIGTERM, signal_handler)
     
     # Print starting message
-    print("Starting Green-Boy created by adamlaho")
+    print("Starting Green-Boy created by https://github.com/adamlaho/")
     print(f"Process PID: {os.getpid()}")
     
     # Set up the event loop explicitly
