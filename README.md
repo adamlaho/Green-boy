@@ -151,35 +151,6 @@ Green-Boy provides comprehensive resource monitoring:
 
 ## Deployment
 
-### As a Service (systemd)
-
-Create a service file `/etc/systemd/system/green-boy.service`:
-
-```ini
-[Unit]
-Description=Green-Boy SLURM Telegram Bot
-After=network.target
-
-[Service]
-Type=simple
-User=your-username
-WorkingDirectory=/path/to/green-boy
-Environment=TELEGRAM_BOT_TOKEN=your_token_here
-Environment=GREENBOY_AUTH_USERS=123456789,987654321
-ExecStart=/usr/bin/python3 /path/to/green-boy.py
-Restart=always
-RestartSec=10
-
-[Install]
-WantedBy=multi-user.target
-```
-
-Enable and start the service:
-```bash
-sudo systemctl enable green-boy.service
-sudo systemctl start green-boy.service
-```
-
 ### Using Screen or Tmux
 
 ```bash
