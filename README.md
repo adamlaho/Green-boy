@@ -21,7 +21,6 @@ This bot can perform destructive operations on your SLURM cluster, including:
 - Use the authorization system to restrict access
 - Monitor bot activity and logs regularly
 - Have backups of important data
-- Coordinate with your cluster administrators
 
 ---
 
