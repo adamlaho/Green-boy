@@ -51,7 +51,7 @@ A lightweight Telegram bot for SLURM job monitoring with enhanced resource usage
    - Use `/newbot` command and follow instructions
    - Save the bot token
 
-4. **Configure environment variables**
+4. **Configure environment variables (in your .bashrc)**
    ```bash
    export TELEGRAM_BOT_TOKEN="your_bot_token_here"
    export GREENBOY_AUTH_USERS="123456789,987654321"  # Optional: comma-separated user IDs
