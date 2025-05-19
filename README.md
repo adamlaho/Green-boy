@@ -1,5 +1,3 @@
-# Green-Boy 🤖
-
 ![AMLP Logo](green_boy_logo.png)
 
 ## Features
