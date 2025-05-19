@@ -37,13 +37,18 @@ A lightweight Telegram bot for SLURM job monitoring with enhanced resource usage
 
 1. **Clone the repository**
    ```bash
-   git clone https://github.com/al9500/green-boy.git
+   git clone https://github.com/adamlaho/green-boy.git
    cd green-boy
    ```
 
 2. **Install required Python packages**
    ```bash
    pip install -r requirements.txt
+   ```
+   
+   *If the above doesn't work, try:*
+   ```bash
+   python3 -m pip install -r requirements.txt
    ```
 
 3. **Create a Telegram bot**
@@ -150,6 +155,35 @@ Green-Boy provides comprehensive resource monitoring:
 - Exit codes and job state
 
 ## Deployment
+
+### As a Service (systemd)
+
+Create a service file `/etc/systemd/system/green-boy.service`:
+
+```ini
+[Unit]
+Description=Green-Boy SLURM Telegram Bot
+After=network.target
+
+[Service]
+Type=simple
+User=your-username
+WorkingDirectory=/path/to/green-boy
+Environment=TELEGRAM_BOT_TOKEN=your_token_here
+Environment=GREENBOY_AUTH_USERS=123456789,987654321
+ExecStart=/usr/bin/python3 /path/to/green-boy.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Enable and start the service:
+```bash
+sudo systemctl enable green-boy.service
+sudo systemctl start green-boy.service
+```
 
 ### Using Screen or Tmux
 
