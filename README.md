@@ -1,6 +1,5 @@
 # Green-Boy 🤖
 
-![Greenboy Logo](green_boy_logo.png)
 
 ## Features
 
