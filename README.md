@@ -1,12 +1,8 @@
 ![AMLP Logo](green_boy_logo.png)
 
-# Green-Boy: SLURM Monitoring Bot
-
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.7+](https://img.shields.io/badge/python-3.7+-blue.svg)](https://www.python.org/downloads/)
 [![SLURM](https://img.shields.io/badge/SLURM-compatible-brightgreen.svg)](https://slurm.schedmd.com/)
-
-A lightweight Telegram bot for SLURM job monitoring with enhanced resource tracking capabilities.
 
 ## Navigation
 
