@@ -4,8 +4,6 @@
 [![Python 3.7+](https://img.shields.io/badge/python-3.7+-blue.svg)](https://www.python.org/downloads/)
 [![SLURM](https://img.shields.io/badge/SLURM-compatible-brightgreen.svg)](https://slurm.schedmd.com/)
 
-# Green-Boy: SLURM Management via Telegram
-
 ## Navigation
 
 | [📋 Overview](#overview) | [🚀 Features](#features) | [⚙️ Installation](#installation) | [📝 Usage](#usage) | [🔍 Commands](#available-commands) |
