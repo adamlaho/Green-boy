@@ -1,7 +1,7 @@
-#!/usr/bin/env python3
 """
 Green-Boy: A lightweight Telegram bot for SLURM job monitoring
-with enhanced resource usage monitoring capabilities
+with enhanced resource usage monitoring capabilities and improved UI
+Version 1.3.2 - Complete Enhancement with Process Protection
 """
 import os
 import subprocess
@@ -12,6 +12,8 @@ import re
 import signal
 import time
 import json
+import fcntl
+import socket
 from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, CallbackQueryHandler
@@ -29,8 +31,11 @@ AUTHORIZED_USERS = [int(user_id.strip()) for user_id in AUTH_USERS_STR.split(","
 # Max chars per message
 MAX_MESSAGE_LENGTH = 3500
 
-# File to persist monitored jobs across bot restarts
-MONITORED_JOBS_FILE = "monitored_jobs.json"
+# Files and paths
+CURRENT_USER = os.getenv('USER', 'unknown')
+LOCK_FILE_PATH = f"/tmp/greenboy-{CURRENT_USER}.lock"  # User-specific lock file
+MONITORED_JOBS_FILE = f"monitored_jobs-{CURRENT_USER}.json"  # User-specific jobs file
+USER_PORT = 49152 + (hash(CURRENT_USER) % 1000)  # User-specific port between 49152-50152
 
 # ─── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -38,6 +43,342 @@ logging.basicConfig(
     level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
+
+# ─── Process Lock System ────────────────────────────────────────────────────────
+# Global variables for lock handling
+lock_file = None
+lock_socket = None
+
+def check_running_instance():
+    """
+    Check if another instance is already running using both file lock and socket methods.
+    Returns True if no other instance is running, False otherwise.
+    """
+    global lock_file, lock_socket
+    
+    # Method 1: File locking
+    try:
+        lock_file = open(LOCK_FILE_PATH, 'w')
+        fcntl.lockf(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        # Write PID to the file
+        lock_file.truncate(0)
+        lock_file.write(str(os.getpid()))
+        lock_file.flush()
+        print(f"Lock file acquired at {LOCK_FILE_PATH}")
+    except IOError:
+        print("Another instance is already running (file lock exists)")
+        try:
+            if lock_file:
+                lock_file.close()
+        except:
+            pass
+        return False
+    
+    # Method 2: Socket binding (double protection)
+    try:
+        # Try to bind to a specific port
+        lock_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        lock_socket.bind(('localhost', USER_PORT))  # User-specific port
+        print(f"Socket lock acquired on port {USER_PORT}")
+    except socket.error:
+        print(f"Another instance is already running (port {USER_PORT} is in use)")
+        try:
+            if lock_file:
+                lock_file.close()
+        except:
+            pass
+        return False
+        
+    return True
+
+def release_locks():
+    """Release all locks when shutting down."""
+    global lock_file, lock_socket
+    
+    print("Releasing process locks...")
+    
+    # Release file lock
+    try:
+        if lock_file:
+            lock_file.close()
+            print("File lock released")
+    except Exception as e:
+        print(f"Error releasing file lock: {e}")
+    
+    # Release socket lock
+    try:
+        if lock_socket:
+            lock_socket.close()
+            print("Socket lock released")
+    except Exception as e:
+        print(f"Error releasing socket lock: {e}")
+
+# ─── Process Management Functions ────────────────────────────────────────────────
+
+def kill_running_bot_processes():
+    """
+    Find and kill any running instances of the bot FOR THE CURRENT USER ONLY.
+    Returns the number of processes killed.
+    """
+    import subprocess
+    import signal
+    import time
+    
+    print("Checking for running bot processes...")
+    
+    # Find all Python processes that match our bot's signature AND our user
+    try:
+        # Use different approaches to find processes
+        processes = []
+        current_user = os.getenv('USER', 'unknown')
+        print(f"Looking for processes owned by current user: {current_user}")
+        
+        # Method 1: Using ps with grep (most reliable)
+        try:
+            ps_cmd = ["ps", "-ef"]
+            ps_output = subprocess.check_output(ps_cmd, text=True)
+            
+            for line in ps_output.splitlines():
+                # Look for green-boy.py but exclude grep processes, this process, and other users
+                if "green-boy.py" in line and "grep" not in line and str(os.getpid()) not in line:
+                    parts = line.split()
+                    if len(parts) > 1:
+                        # Check if this process belongs to the current user
+                        if current_user in line:
+                            pid = int(parts[1])
+                            processes.append(pid)
+                            print(f"Found bot process: {line.strip()}")
+        except Exception as e:
+            print(f"Error using ps to find processes: {e}")
+        
+        # Method 2: Using pgrep if available (with user filter)
+        try:
+            pgrep_cmd = ["pgrep", "-u", current_user, "-f", "green-boy.py"]
+            pgrep_output = subprocess.check_output(pgrep_cmd, text=True)
+            for line in pgrep_output.splitlines():
+                try:
+                    pid = int(line.strip())
+                    if pid != os.getpid() and pid not in processes:  # Exclude this process
+                        processes.append(pid)
+                        print(f"Found bot process (pgrep): PID {pid}")
+                except ValueError:
+                    pass
+        except (subprocess.SubprocessError, FileNotFoundError):
+            # pgrep might not be available on all systems
+            pass
+            
+        # Method 3: Check user-specific lock file for potentially stale PID
+        try:
+            if os.path.exists(LOCK_FILE_PATH):
+                with open(LOCK_FILE_PATH, 'r') as f:
+                    content = f.read().strip()
+                    try:
+                        pid = int(content)
+                        if pid != os.getpid() and pid not in processes:
+                            processes.append(pid)
+                            print(f"Found bot process from lock file: PID {pid}")
+                    except ValueError:
+                        pass
+                # Always remove the lock file to clean stale locks
+                try:
+                    os.remove(LOCK_FILE_PATH)
+                    print(f"Removed potentially stale lock file: {LOCK_FILE_PATH}")
+                except:
+                    pass
+        except Exception as e:
+            print(f"Error checking lock file: {e}")
+            
+        # Try to kill processes in original and reverse order (sometimes killing
+        # parent processes first helps)
+        processes_to_try = list(processes) + list(reversed(processes))
+        killed_count = 0
+        killed_pids = set()  # Track which PIDs we've already killed
+        
+        for pid in processes_to_try:
+            if pid in killed_pids:
+                continue  # Skip if we've already killed this one
+                
+            try:
+                # First try SIGTERM for graceful shutdown
+                print(f"Attempting to terminate process {pid}...")
+                os.kill(pid, signal.SIGTERM)
+                
+                # Wait a bit to see if it terminates
+                for _ in range(5):  # Wait up to 5 seconds
+                    time.sleep(1)
+                    try:
+                        # Check if process still exists
+                        os.kill(pid, 0)
+                    except OSError:
+                        # Process no longer exists
+                        print(f"Process {pid} terminated successfully")
+                        killed_count += 1
+                        killed_pids.add(pid)
+                        break
+                else:
+                    # Process didn't terminate, use SIGKILL
+                    print(f"Process {pid} didn't terminate gracefully, forcing kill...")
+                    try:
+                        os.kill(pid, signal.SIGKILL)
+                        killed_count += 1
+                        killed_pids.add(pid)
+                        print(f"Process {pid} killed")
+                    except Exception as e:
+                        print(f"Error killing process {pid} with SIGKILL: {e}")
+                    
+            except OSError as e:
+                if e.errno == 3:  # No such process
+                    print(f"Process {pid} no longer exists")
+                else:
+                    print(f"Error killing process {pid}: {e}")
+        
+        # Also use killall as a last resort - but only for current user's processes
+        try:
+            # This will fail if no processes match, which is fine
+            killall_cmd = ["killall", "-u", current_user, "-9", "green-boy.py"]
+            subprocess.run(killall_cmd, stderr=subprocess.DEVNULL)
+            print(f"Attempted killall for user {current_user}")
+        except:
+            pass
+            
+        # Check for and remove any socket binding on our user's port
+        try:
+            # Try to create a socket and bind it - if it fails, something is still using the port
+            test_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            test_socket.bind(('localhost', USER_PORT))
+            test_socket.close()
+            print(f"Port {USER_PORT} is free")
+        except socket.error:
+            print(f"Port {USER_PORT} is still in use - attempting to free it")
+            try:
+                # We can only reliably free ports owned by our user
+                subprocess.run(["fuser", "-k", f"{USER_PORT}/tcp"], stderr=subprocess.DEVNULL)
+                print(f"Killed processes using port {USER_PORT}")
+            except:
+                pass
+                
+        # Clean up any lock file
+        try:
+            if os.path.exists(LOCK_FILE_PATH):
+                os.remove(LOCK_FILE_PATH)
+                print(f"Removed lock file {LOCK_FILE_PATH}")
+        except Exception as e:
+            print(f"Error removing lock file: {e}")
+            
+        return len(killed_pids)
+        
+    except Exception as e:
+        print(f"Error checking for running processes: {e}")
+        return 0
+
+def aggressive_webhook_cleanup():
+    """
+    Aggressively clear webhook with multiple attempts and verification.
+    Returns True if successful, False otherwise.
+    """
+    import requests
+    import time
+    import json
+    
+    print(f"Starting aggressive webhook cleanup...")
+    
+    # First, get the current webhook info to see if there's anything to clean
+    try:
+        get_webhook_url = f"https://api.telegram.org/bot{BOT_TOKEN}/getWebhookInfo"
+        response = requests.get(get_webhook_url, timeout=15)
+        if response.status_code == 200:
+            webhook_data = response.json()
+            if 'result' in webhook_data:
+                current_url = webhook_data['result'].get('url', '')
+                if current_url:
+                    print(f"Found existing webhook: {current_url}")
+                else:
+                    print("No webhook currently set")
+    except Exception as e:
+        print(f"Error checking webhook status: {e}")
+    
+    # Try to delete the webhook multiple times
+    success = False
+    for attempt in range(1, 6):  # 5 attempts
+        try:
+            print(f"Webhook deletion attempt {attempt}/5...")
+            
+            # Use both drop_pending_updates and specific HTTP headers
+            delete_url = f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook"
+            headers = {
+                'Connection': 'close',
+                'Content-Type': 'application/json'
+            }
+            data = {
+                'drop_pending_updates': True
+            }
+            
+            # Use a longer timeout and explicit connection close
+            response = requests.post(
+                delete_url, 
+                headers=headers,
+                data=json.dumps(data), 
+                timeout=20
+            )
+            
+            # Check response
+            if response.status_code == 200:
+                response_data = response.json()
+                if response_data.get('ok', False):
+                    print(f"Webhook successfully deleted on attempt {attempt}")
+                    
+                    # Verify the webhook is truly gone
+                    time.sleep(3)  # Wait before verification
+                    verify_response = requests.get(get_webhook_url, timeout=15)
+                    if verify_response.status_code == 200:
+                        verify_data = verify_response.json()
+                        if 'result' in verify_data and not verify_data['result'].get('url', ''):
+                            print("Webhook deletion verified. No webhook is set now.")
+                            
+                            # Also clear any pending updates
+                            try:
+                                print("Clearing any pending updates...")
+                                clear_updates_url = f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates"
+                                clear_data = {
+                                    "offset": -1,
+                                    "limit": 1,
+                                    "timeout": 0,
+                                    "allowed_updates": []
+                                }
+                                clear_response = requests.post(
+                                    clear_updates_url,
+                                    json=clear_data,
+                                    timeout=10
+                                )
+                                print(f"Clear updates response: {clear_response.status_code}")
+                            except Exception as e:
+                                print(f"Error clearing updates: {e}")
+                            
+                            success = True
+                            break
+                        else:
+                            print("Webhook still exists after deletion attempt. Will retry.")
+                else:
+                    print(f"Webhook deletion response not OK: {response_data}")
+            else:
+                print(f"Webhook deletion failed with status code: {response.status_code}")
+                
+        except Exception as e:
+            print(f"Error in webhook deletion attempt {attempt}: {e}")
+        
+        # Wait longer between attempts
+        wait_time = attempt * 5  # Progressive backoff
+        print(f"Waiting {wait_time} seconds before next attempt...")
+        time.sleep(wait_time)
+    
+    if success:
+        # One final delay before returning to ensure everything is settled
+        print("Webhook successfully cleaned up. Waiting 30 seconds for API to settle...")
+        time.sleep(30)  # Increased from 10 to 30 seconds
+        return True
+    else:
+        print("Failed to clean up webhook after multiple attempts")
+        return False
 
 # ─── Job Monitoring System ─────────────────────────────────────────────────────
 
@@ -356,16 +697,29 @@ def get_cluster_status() -> str:
 def cleanup_on_exit():
     """Clean up when the bot is shutting down."""
     print("Bot shutting down...")
+    
+    # Release process locks
+    release_locks()
+    
+    # Clear webhook
     try:
         import requests
-        requests.post(
+        response = requests.post(
             f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook",
             json={"drop_pending_updates": True},
-            timeout=5
+            timeout=10
         )
-        print("Webhook cleared on exit")
+        print(f"Webhook cleared on exit: {response.status_code}")
     except Exception as e:
         print(f"Could not clear webhook on exit: {e}")
+        
+    # Try to remove lock file if it exists
+    try:
+        if os.path.exists(LOCK_FILE_PATH):
+            os.remove(LOCK_FILE_PATH)
+            print(f"Removed lock file {LOCK_FILE_PATH}")
+    except Exception as e:
+        print(f"Error removing lock file: {e}")
 
 def signal_handler(signum, frame):
     """Handle shutdown signals gracefully."""
@@ -392,6 +746,177 @@ def paginate_lines(text: str, max_chars: int):
     if chunk:
         yield "\n".join(chunk)
 
+# ─── Enhanced Display Functions ───────────────────────────────────────────────────
+
+def parse_squeue_output(raw_output: str) -> list[dict]:
+    """Parse raw squeue output into a list of job dictionaries."""
+    lines = raw_output.strip().split('\n')
+    if len(lines) < 2:  # No jobs or header only
+        return []
+    
+    # Parse header to get column names
+    header = lines[0]
+    # Split by whitespace but preserve multi-word fields
+    header_parts = header.split()
+    
+    jobs = []
+    # Process each job line
+    for line in lines[1:]:
+        # Skip empty lines
+        if not line.strip():
+            continue
+            
+        # Parse job data based on the format of squeue output
+        # This requires careful handling since fields might have spaces
+        job_data = {}
+        
+        # Split the line into parts (but be careful about fields with spaces)
+        parts = line.split()
+        
+        # Handle standard fields
+        if len(parts) >= 8:  # Minimum expected columns
+            job_data['JOBID'] = parts[0]
+            job_data['PARTITION'] = parts[1]
+            job_data['NAME'] = parts[2]
+            job_data['USER'] = parts[3]
+            job_data['STATE'] = parts[4]
+            job_data['TIME'] = parts[5]
+            job_data['NODES'] = parts[6]
+            
+            # The last part might be NODELIST or REASON in parentheses
+            # Combine all remaining parts for NODELIST/REASON
+            job_data['NODELIST_REASON'] = ' '.join(parts[7:])
+        
+        jobs.append(job_data)
+    
+    return jobs
+
+def get_state_emoji(state: str) -> str:
+    """Return an emoji representing the job state."""
+    state = state.upper()
+    if state == 'R':
+        return '🟢'  # Running
+    elif state == 'PD':
+        return '🟡'  # Pending
+    elif state == 'CG':
+        return '🔵'  # Completing
+    elif state in ['F', 'FAILED']:
+        return '🔴'  # Failed
+    elif state in ['CA', 'CANCELLED']:
+        return '⚫'  # Cancelled
+    elif state in ['CD', 'COMPLETED']:
+        return '✅'  # Completed
+    elif state in ['TO', 'TIMEOUT']:
+        return '⏱️'  # Timeout
+    else:
+        return '❓'  # Unknown state
+
+def format_fancy_job_list(jobs: list[dict], add_buttons: bool = False) -> tuple[str, list]:
+    """
+    Format the jobs into a pretty display format.
+    Returns formatted output and list of job IDs for buttons.
+    """
+    if not jobs:
+        return "*No jobs found*", []
+    
+    # Create a formatted output with emojis and better spacing
+    output = "*Your SLURM Jobs*\n\n"
+    job_ids = []
+    
+    for job in jobs:
+        # Get state with emoji
+        state = job.get('STATE', '?')
+        state_emoji = get_state_emoji(state)
+        
+        # Format job info with emojis and better layout
+        job_id = job.get('JOBID', '?')
+        job_ids.append(job_id)
+        job_name = job.get('NAME', '?')
+        partition = job.get('PARTITION', '?')
+        runtime = job.get('TIME', '?')
+        nodes = job.get('NODES', '?')
+        
+        # Get reason or nodelist
+        nodelist_reason = job.get('NODELIST_REASON', '')
+        reason = ""
+        if '(' in nodelist_reason and ')' in nodelist_reason:
+            # Extract reason in parentheses
+            reason = nodelist_reason[nodelist_reason.find('(')+1:nodelist_reason.find(')')]
+            if reason:
+                reason = f"({reason})"
+        
+        # Format the job entry
+        if add_buttons:
+            # Make job ID plain text (buttons will be added separately)
+            output += f"{state_emoji} *Job {job_id}*: `{job_name}`\n"
+        else:
+            # Make job ID a clickable reference
+            output += f"{state_emoji} *Job {job_id}*: `{job_name}`\n"
+            
+        output += f"    • Partition: `{partition}`\n"
+        output += f"    • Runtime: `{runtime}`\n"
+        output += f"    • Nodes: `{nodes}`\n"
+        
+        if reason:
+            output += f"    • Reason: `{reason}`\n"
+            
+        output += "\n"  # Add space between jobs
+    
+    return output, job_ids
+
+def format_cluster_status(raw_output: str) -> str:
+    """Format cluster status in a more user-friendly way."""
+    lines = raw_output.strip().split('\n')
+    if len(lines) < 2:
+        return "*No cluster information available*"
+    
+    # Parse header
+    header = lines[0]
+    header_parts = header.split()
+    
+    # Create a formatted output
+    output = "🖥️ *Cluster Status*\n\n"
+    
+    # Process each partition line
+    for line in lines[1:]:
+        parts = line.split()
+        if len(parts) < 6:  # Ensure we have enough parts
+            continue
+        
+        partition = parts[0].strip()
+        avail = parts[1].strip()
+        nodes = parts[2].strip()
+        cpus = parts[3].strip()
+        state = parts[4].strip()
+        nodelist = ' '.join(parts[5:]).strip()
+        
+        # Determine state emoji
+        state_emoji = "🔄"  # Default: mixed/partial
+        if state.lower() == "idle":
+            state_emoji = "🟢"  # Idle: available
+        elif state.lower() == "down" or state.lower() == "drain":
+            state_emoji = "🔴"  # Down/drain: unavailable
+        elif state.lower() == "alloc":
+            state_emoji = "🟡"  # Allocated: busy
+        elif state.lower() == "mix":
+            state_emoji = "🔄"  # Mix: partially busy
+            
+        # Format partition info
+        output += f"{state_emoji} *Partition {partition}*\n"
+        output += f"    • Availability: `{avail}`\n"
+        output += f"    • Nodes: `{nodes}`\n" 
+        output += f"    • State: `{state}`\n"
+        
+        # Only add nodelist if it's not too long
+        if len(nodelist) < 50:
+            output += f"    • Nodes: `{nodelist}`\n"
+        else:
+            output += f"    • Nodes: `{nodelist[:47]}...`\n"
+            
+        output += "\n"
+    
+    return output
+
 # ─── Job Monitoring Functions ─────────────────────────────────────────────────
 
 async def monitor_job(update: Update, context: ContextTypes.DEFAULT_TYPE, job_id: str):
@@ -407,16 +932,24 @@ async def monitor_job(update: Update, context: ContextTypes.DEFAULT_TYPE, job_id
     # Check if job exists and get current state
     job_details = get_job_details(job_id)
     if "Error" in job_details:
-        await update.message.reply_text(f"❌ Cannot monitor job {job_id}: {job_details['Error']}")
+        if update.callback_query:
+            await update.callback_query.edit_message_text(f"❌ Cannot monitor job {job_id}: {job_details['Error']}")
+        else:
+            await update.message.reply_text(f"❌ Cannot monitor job {job_id}: {job_details['Error']}")
         return False
     
     current_state = job_details.get("JobState", "UNKNOWN")
     
     # Only monitor jobs that haven't completed yet
     if current_state in ["COMPLETED", "CANCELLED", "FAILED", "TIMEOUT"]:
-        await update.message.reply_text(
-            f"⚠️ Job {job_id} has already finished (state: {current_state}). Cannot monitor."
-        )
+        if update.callback_query:
+            await update.callback_query.edit_message_text(
+                f"⚠️ Job {job_id} has already finished (state: {current_state}). Cannot monitor."
+            )
+        else:
+            await update.message.reply_text(
+                f"⚠️ Job {job_id} has already finished (state: {current_state}). Cannot monitor."
+            )
         return False
     
     # Add job to monitored list
@@ -430,10 +963,22 @@ async def monitor_job(update: Update, context: ContextTypes.DEFAULT_TYPE, job_id
     # Save to file
     save_monitored_jobs()
     
-    await update.message.reply_text(
-        f"✅ Now monitoring job {job_id}. You'll be notified when it completes.\n"
-        f"Current state: {current_state}"
-    )
+    # Use callback query if available, otherwise use message
+    if update.callback_query:
+        await update.callback_query.answer(f"✅ Now monitoring job {job_id}")
+        # Create keyboard with job info button
+        keyboard = [[InlineKeyboardButton("📋 Job Details", callback_data=f"jobinfo_{job_id}")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await update.callback_query.edit_message_text(
+            f"✅ Now monitoring job {job_id}. You'll be notified when it completes.\n"
+            f"Current state: {current_state}",
+            reply_markup=reply_markup
+        )
+    else:
+        await update.message.reply_text(
+            f"✅ Now monitoring job {job_id}. You'll be notified when it completes.\n"
+            f"Current state: {current_state}"
+        )
     return True
 
 async def stop_monitoring_job(update: Update, context: ContextTypes.DEFAULT_TYPE, job_id: str):
@@ -447,11 +992,21 @@ async def stop_monitoring_job(update: Update, context: ContextTypes.DEFAULT_TYPE
     
     # Check if job is being monitored and user is authorized
     if job_id not in MONITORED_JOBS:
-        await update.message.reply_text(f"❌ Job {job_id} is not being monitored.")
+        # Use callback query if available, otherwise use message
+        if update.callback_query:
+            await update.callback_query.answer(f"❌ Job {job_id} is not being monitored.")
+            await update.callback_query.edit_message_text(f"❌ Job {job_id} is not being monitored.")
+        else:
+            await update.message.reply_text(f"❌ Job {job_id} is not being monitored.")
         return False
     
     if MONITORED_JOBS[job_id]["user_id"] != user_id and not is_authorized(user_id):
-        await update.message.reply_text(f"⛔ You are not authorized to stop monitoring job {job_id}.")
+        # Use callback query if available, otherwise use message
+        if update.callback_query:
+            await update.callback_query.answer(f"⛔ Not authorized")
+            await update.callback_query.edit_message_text(f"⛔ You are not authorized to stop monitoring job {job_id}.")
+        else:
+            await update.message.reply_text(f"⛔ You are not authorized to stop monitoring job {job_id}.")
         return False
     
     # Remove job from monitored list
@@ -460,7 +1015,12 @@ async def stop_monitoring_job(update: Update, context: ContextTypes.DEFAULT_TYPE
     # Save to file
     save_monitored_jobs()
     
-    await update.message.reply_text(f"✅ Stopped monitoring job {job_id}.")
+    # Use callback query if available, otherwise use message
+    if update.callback_query:
+        await update.callback_query.answer(f"✅ Stopped monitoring job {job_id}")
+        await update.callback_query.edit_message_text(f"✅ Stopped monitoring job {job_id}.")
+    else:
+        await update.message.reply_text(f"✅ Stopped monitoring job {job_id}.")
     return True
 
 async def check_monitored_jobs(context: ContextTypes.DEFAULT_TYPE):
@@ -627,6 +1187,20 @@ async def squeue_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     """
     flags = context.args or ["-t", "R"]
     raw = run_squeue(flags)
+    
+    # Parse and format the output
+    try:
+        jobs = parse_squeue_output(raw)
+        formatted_output, job_ids = format_fancy_job_list(jobs)
+    except Exception as e:
+        logger.error(f"Error formatting job list: {e}")
+        # Fall back to original format if parsing fails
+        formatted_output = f"<pre>{raw}</pre>"
+        await update.message.reply_text(
+            formatted_output,
+            parse_mode="HTML"
+        )
+        return
 
     # Create an inline keyboard for common actions
     keyboard = [
@@ -639,16 +1213,28 @@ async def squeue_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             InlineKeyboardButton("🖥️ GPU Jobs", callback_data="squeue_gpu")
         ]
     ]
+    
+    # Add job ID buttons (but only if we don't have too many)
+    if len(job_ids) > 0 and len(job_ids) <= 10:
+        for job_id in job_ids:
+            keyboard.append([
+                InlineKeyboardButton(f"📋 Info for job {job_id}", callback_data=f"jobinfo_{job_id}")
+            ])
+    
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     # Paginate if necessary
-    for i, chunk in enumerate(paginate_lines(raw, MAX_MESSAGE_LENGTH)):
-        formatted = f"<pre>{chunk}</pre>"
-        # Only add the keyboard to the first message
-        if i == 0:
-            await update.message.reply_text(formatted, parse_mode="HTML", reply_markup=reply_markup)
-        else:
-            await update.message.reply_text(formatted, parse_mode="HTML")
+    if len(formatted_output) > MAX_MESSAGE_LENGTH:
+        # If the fancy format is too long, fall back to the original format with pagination
+        for i, chunk in enumerate(paginate_lines(raw, MAX_MESSAGE_LENGTH)):
+            chunk_formatted = f"<pre>{chunk}</pre>"
+            if i == 0:
+                await update.message.reply_text(chunk_formatted, parse_mode="HTML", reply_markup=reply_markup)
+            else:
+                await update.message.reply_text(chunk_formatted, parse_mode="HTML")
+    else:
+        # Send the fancy formatted output
+        await update.message.reply_text(formatted_output, parse_mode="Markdown", reply_markup=reply_markup)
 
 async def cancel_command_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Authorization wrapper for cancel command"""
@@ -847,9 +1433,17 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     """
     /status  — show overall cluster status
     """
-    status = get_cluster_status()
+    raw_status = get_cluster_status()
     
-    formatted = f"🖥️ *Cluster Status*\n\n<pre>{status}</pre>"
+    # Try to format the status in a prettier way
+    try:
+        formatted = format_cluster_status(raw_status)
+    except Exception as e:
+        logger.error(f"Error formatting cluster status: {e}")
+        # Fall back to original format
+        formatted = f"🖥️ *Cluster Status*\n\n<pre>{raw_status}</pre>"
+        await update.message.reply_text(formatted, parse_mode="HTML")
+        return
     
     # Add shutdown button for authorized users
     keyboard = []
@@ -858,7 +1452,9 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         keyboard.append([InlineKeyboardButton("🔴 Shutdown Bot", callback_data="shutdown_confirm")])
     
     reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
-    await update.message.reply_text(formatted, parse_mode="HTML", reply_markup=reply_markup)
+    
+    # Send the formatted status
+    await update.message.reply_text(formatted, parse_mode="Markdown", reply_markup=reply_markup)
 
 async def submit_command_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Authorization wrapper for submit command"""
@@ -1004,10 +1600,12 @@ async def monitorlist_command(update: Update, context: ContextTypes.DEFAULT_TYPE
             current_state = "Error"
             job_name = "Unknown"
         
-        reply += f"*Job ID:* {job_id}\n"
-        reply += f"*Name:* {job_name}\n"
-        reply += f"*Current State:* {current_state}\n"
-        reply += f"*Since:* {job_info.get('added_time', 'Unknown')}\n\n"
+        # Get state emoji
+        state_emoji = get_state_emoji(current_state)
+        
+        reply += f"{state_emoji} *Job {job_id}*: `{job_name}`\n"
+        reply += f"    • State: `{current_state}`\n"
+        reply += f"    • Since: `{job_info.get('added_time', 'Unknown')}`\n\n"
     
     # Add keyboard with monitor/unmonitor buttons
     keyboard = []
@@ -1093,7 +1691,36 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         
         raw = run_squeue(flags)
         
-        # Create the same keyboard for consistency
+        # Parse and format the output
+        try:
+            jobs = parse_squeue_output(raw)
+            formatted_output, job_ids = format_fancy_job_list(jobs)
+        except Exception as e:
+            logger.error(f"Error formatting job list: {e}")
+            # Fall back to original format if parsing fails
+            formatted_output = f"<pre>{raw}</pre>"
+            
+            # Create the same keyboard for consistency
+            keyboard = [
+                [
+                    InlineKeyboardButton("📊 All Jobs", callback_data="squeue_all"),
+                    InlineKeyboardButton("⏳ Pending", callback_data="squeue_pending")
+                ],
+                [
+                    InlineKeyboardButton("🏃 Running", callback_data="squeue_running"),
+                    InlineKeyboardButton("🖥️ GPU Jobs", callback_data="squeue_gpu")
+                ]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await query.edit_message_text(
+                formatted_output,
+                parse_mode="HTML",
+                reply_markup=reply_markup
+            )
+            return
+        
+        # Create keyboard with filter buttons
         keyboard = [
             [
                 InlineKeyboardButton("📊 All Jobs", callback_data="squeue_all"),
@@ -1104,18 +1731,40 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 InlineKeyboardButton("🖥️ GPU Jobs", callback_data="squeue_gpu")
             ]
         ]
+        
+        # Add job ID buttons (but only if we don't have too many)
+        if len(job_ids) > 0 and len(job_ids) <= 10:
+            for job_id in job_ids:
+                keyboard.append([
+                    InlineKeyboardButton(f"📋 Info for job {job_id}", callback_data=f"jobinfo_{job_id}")
+                ])
+        
         reply_markup = InlineKeyboardMarkup(keyboard)
         
-        for i, chunk in enumerate(paginate_lines(raw, MAX_MESSAGE_LENGTH)):
-            formatted = f"<pre>{chunk}</pre>"
-            if i == 0:
-                await query.edit_message_text(formatted, parse_mode="HTML", reply_markup=reply_markup)
-            else:
-                await context.bot.send_message(
-                    chat_id=query.message.chat_id,
-                    text=formatted,
-                    parse_mode="HTML"
-                )
+        # Paginate if necessary
+        if len(formatted_output) > MAX_MESSAGE_LENGTH:
+            # If the fancy format is too long, fall back to the original format with pagination
+            for i, chunk in enumerate(paginate_lines(raw, MAX_MESSAGE_LENGTH)):
+                chunk_formatted = f"<pre>{chunk}</pre>"
+                if i == 0:
+                    await query.edit_message_text(
+                        chunk_formatted,
+                        parse_mode="HTML",
+                        reply_markup=reply_markup
+                    )
+                else:
+                    await context.bot.send_message(
+                        chat_id=query.message.chat_id,
+                        text=chunk_formatted,
+                        parse_mode="HTML"
+                    )
+        else:
+            # Send the fancy formatted output
+            await query.edit_message_text(
+                formatted_output,
+                parse_mode="Markdown",
+                reply_markup=reply_markup
+            )
     
     # Handle cancel job button (improved version)
     elif data.startswith("cancel_"):
@@ -1251,6 +1900,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         print(f"Bot shutdown initiated by {user_info}")
         await context.application.stop()
         await context.application.shutdown()
+        
+        # Release locks
+        release_locks()
         
         # Force exit
         os._exit(0)
@@ -1431,11 +2083,68 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 reply_markup=reply_markup
             )
 
+# ─── Error Handler ─────────────────────────────────────────────────────────────
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle errors in the telegram-python-bot library."""
+    # Log the error
+    logger.error("Exception while handling an update:", exc_info=context.error)
+    
+    # Extract error details
+    error_type = type(context.error).__name__
+    error_message = str(context.error)
+    
+    # Handle Conflict errors specially
+    if isinstance(context.error, Conflict):
+        logger.error("Conflict error detected - this might indicate multiple bot instances")
+        # Note: Don't exit here, as this would terminate the error handler not the application
+        # Instead, log the issue and let the main polling loop handle it
+    
+    # Get the user that triggered the error
+    if update and hasattr(update, 'effective_user'):
+        user_id = update.effective_user.id if update.effective_user else "Unknown"
+        logger.error(f"Error triggered by user: {user_id}")
+    
+    # Inform user of the error if we have an update object
+    if update and hasattr(update, 'effective_message') and update.effective_message:
+        await update.effective_message.reply_text(
+            f"⚠️ An error occurred: {error_type}\n"
+            "The bot administrator has been notified."
+        )
+
 # ─── Bot Setup ────────────────────────────────────────────────────────────────
 
 def main():
-    """Main function to start the bot"""
-    # Register signal handlers for graceful shutdown
+    """Main function to start the bot with enhanced protection against multiple instances"""
+    
+    # Step 1: Kill any existing instances of the bot
+    print("=" * 60)
+    print("STARTING GREEN-BOY BOT WITH STRONG CONFLICT PROTECTION")
+    print("=" * 60)
+    
+    # First, validate the bot token minimally
+    if not BOT_TOKEN or len(BOT_TOKEN) < 20:
+        print("ERROR: Invalid bot token. Please set TELEGRAM_BOT_TOKEN environment variable.")
+        return 1
+    
+    # Kill any existing processes first
+    killed_processes = kill_running_bot_processes()
+    if killed_processes > 0:
+        print(f"Killed {killed_processes} existing bot processes")
+        # Wait to make sure everything is properly terminated
+        print("Waiting 10 seconds to ensure processes are fully terminated...")
+        time.sleep(10)
+    
+    # Step 2: Check if another instance is still running
+    if not check_running_instance():
+        print("ERROR: Another instance of the bot is still running despite cleanup. Exiting.")
+        return 1
+    
+    # Step 3: Aggressively clean up any existing webhooks
+    if not aggressive_webhook_cleanup():
+        print("WARNING: Webhook cleanup might not have been successful")
+        # Continue anyway, but with a warning
+    
+    # Step 4: Register signal handlers for graceful shutdown
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
     
@@ -1450,39 +2159,20 @@ def main():
     # Load saved monitored jobs
     load_monitored_jobs()
     
-    # More aggressive webhook cleanup
-    max_cleanup_attempts = 5
-    for attempt in range(max_cleanup_attempts):
-        try:
-            import requests
-            print(f"Clearing webhook (attempt {attempt + 1}/{max_cleanup_attempts})...")
-            response = requests.post(
-                f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook",
-                json={"drop_pending_updates": True},
-                timeout=10
-            )
-            if response.status_code == 200:
-                print("Webhook cleared successfully")
-                break
-            else:
-                print(f"Webhook clear attempt {attempt + 1} failed: {response.text}")
-        except Exception as e:
-            print(f"Webhook clear attempt {attempt + 1} failed: {e}")
-        
-        if attempt < max_cleanup_attempts - 1:
-            print("Waiting 3 seconds before retry...")
-            time.sleep(3)
-    
-    # Wait for API to settle
-    print("Waiting for Telegram API to settle (5 seconds)...")
-    time.sleep(5)
-    
     # Retry mechanism for bot startup
-    max_startup_attempts = 3
+    max_startup_attempts = 5
     for startup_attempt in range(max_startup_attempts):
         try:
-            # Build application
-            application = ApplicationBuilder().token(BOT_TOKEN).build()
+            # Use the ApplicationBuilder with more conservative settings
+            application = (ApplicationBuilder()
+                .token(BOT_TOKEN)
+                .connect_timeout(30.0)
+                .read_timeout(30.0)
+                .get_updates_connect_timeout(30.0)
+                .get_updates_read_timeout(30.0)
+                .get_updates_connection_pool_size(1)  # Use just one connection
+                .connection_pool_size(4)  # Keep connection pool small
+                .build())
             
             # Register command handlers
             application.add_handler(CommandHandler("start", start_command))
@@ -1505,9 +2195,27 @@ def main():
             # Register callback query handler for buttons
             application.add_handler(CallbackQueryHandler(button_callback))
             
+            # Register error handler
+            application.add_error_handler(error_handler)
+            
             # Set up the job monitoring background task
             job_queue = application.job_queue
             job_queue.run_repeating(check_monitored_jobs, interval=60, first=10)
+            
+            # Delete webhook once more for extreme paranoia
+            try:
+                import requests
+                response = requests.post(
+                    f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook",
+                    json={"drop_pending_updates": True},
+                    timeout=20
+                )
+                print(f"Final webhook cleanup: {response.status_code}")
+                
+                # Sleep a bit to let API fully process
+                time.sleep(5)
+            except Exception as e:
+                print(f"Final webhook cleanup failed: {e}")
             
             # Print startup message
             print("Green-Boy bot started successfully!")
@@ -1517,10 +2225,17 @@ def main():
             
             # Run the bot with conflict handling
             try:
+                # Use a more conservative approach with explicit update limits
                 application.run_polling(
                     drop_pending_updates=True, 
                     allowed_updates=["message", "callback_query"],
-                    close_loop=False  # Don't close the event loop
+                    close_loop=False,  # Don't close the event loop
+                    poll_interval=2.0,  # Poll even slower
+                    timeout=30,        # Larger timeout
+                    read_timeout=30,   # Explicit read timeout
+                    connect_timeout=30, # Explicit connect timeout
+                    bootstrap_retries=10, # More bootstrap retries
+                    pool_timeout=5.0   # Pool timeout
                 )
                 break  # If we get here, the bot ran successfully
                 
@@ -1528,20 +2243,31 @@ def main():
                 print(f"Telegram Conflict Error (attempt {startup_attempt + 1}): {e}")
                 if startup_attempt < max_startup_attempts - 1:
                     print("This usually means another bot instance is running.")
-                    print("Waiting 10 seconds before retry...")
-                    time.sleep(10)
+                    print("Cleaning up and waiting before retry...")
+                    
+                    # Run even more aggressive cleanup
+                    kill_running_bot_processes()
+                    aggressive_webhook_cleanup()
+                    
+                    # Sleep even longer for conflicts
+                    wait_time = 120 + (startup_attempt * 60)  # 2min, 3min, 4min, etc.
+                    print(f"Waiting {wait_time} seconds before retry...")
+                    time.sleep(wait_time)
                 else:
                     print("Maximum startup attempts reached.")
-                    print("Please run the cleanup script and wait a few minutes before trying again.")
+                    print("Please run the telegram_api_reset.sh script and wait a few minutes before trying again.")
+                    release_locks()
                     return 1
                     
             except NetworkError as e:
                 print(f"Network Error (attempt {startup_attempt + 1}): {e}")
                 if startup_attempt < max_startup_attempts - 1:
-                    print("Waiting 5 seconds before retry...")
-                    time.sleep(5)
+                    wait_time = 30 + (startup_attempt * 30)
+                    print(f"Waiting {wait_time} seconds before retry...")
+                    time.sleep(wait_time)
                 else:
                     print("Network issues persist. Please check your connection.")
+                    release_locks()
                     return 1
                     
         except Exception as e:
@@ -1550,15 +2276,18 @@ def main():
             traceback.print_exc()
             
             if startup_attempt < max_startup_attempts - 1:
-                print("Waiting 5 seconds before retry...")
-                time.sleep(5)
+                wait_time = 30 + (startup_attempt * 30)
+                print(f"Waiting {wait_time} seconds before retry...")
+                time.sleep(wait_time)
             else:
                 print("All startup attempts failed.")
+                release_locks()
                 return 1
     
     # Cleanup on normal exit
     cleanup_on_exit()
     return 0
 
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main())#!/usr/bin/env python3
