@@ -1,6 +1,24 @@
 ![AMLP Logo](green_boy_logo.png)
 
-## ⚠️ **IMPORTANT DISCLAIMER**
+# Green-Boy: SLURM Monitoring Bot
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Python 3.7+](https://img.shields.io/badge/python-3.7+-blue.svg)](https://www.python.org/downloads/)
+[![SLURM](https://img.shields.io/badge/SLURM-compatible-brightgreen.svg)](https://slurm.schedmd.com/)
+
+A lightweight Telegram bot for SLURM job monitoring with enhanced resource tracking capabilities.
+
+## Navigation
+
+| [📋 Overview](#overview) | [🚀 Features](#features) | [⚙️ Installation](#installation) | [📝 Usage](#usage) | [🔍 Commands](#available-commands) |
+|--------------------------|--------------------------|----------------------------------|-------------------|-----------------------------------|
+| [📊 Resource Monitoring](#resource-monitoring) | [🛡️ Security](#security-considerations) | [🔧 Troubleshooting](#troubleshooting) | [📦 Requirements](#requirements) | [📚 Contributing](#contributing) |
+
+## Overview
+
+Green-Boy is a Telegram bot that makes SLURM cluster monitoring and job management easy and accessible from your mobile device or desktop. Monitor your jobs, receive notifications when they complete, check resource usage, and manage your workload - all through a simple chat interface.
+
+⚠️ **IMPORTANT DISCLAIMER**
 
 **USE AT YOUR OWN RISK**
 
@@ -21,6 +39,8 @@ This bot can perform destructive operations on your SLURM cluster, including:
 - Use the authorization system to restrict access
 - Monitor bot activity and logs regularly
 - Have backups of important data
+
+[Back to Navigation](#navigation)
 
 ---
 
@@ -49,6 +69,9 @@ This bot can perform destructive operations on your SLURM cluster, including:
 🔐 **Security**
 - User authorization system
 - Configurable access control
+- User-specific resources to prevent conflicts
+
+[Back to Navigation](#navigation)
 
 ## Installation
 
@@ -92,21 +115,7 @@ This bot can perform destructive operations on your SLURM cluster, including:
    python3 green-boy.py
    ```
 
-## Configuration
-
-### Environment Variables
-
-| Variable | Description | Required | Default |
-|----------|-------------|----------|---------|
-| `TELEGRAM_BOT_TOKEN` | Your Telegram bot token from BotFather | ✅ Yes | - |
-| `GREENBOY_AUTH_USERS` | Comma-separated list of authorized Telegram user IDs | ❌ No | All users allowed |
-
-### Getting Your Telegram User ID
-
-To find your Telegram user ID:
-1. Message [@userinfobot](https://t.me/userinfobot)
-2. Copy the numerical ID
-3. Add it to `GREENBOY_AUTH_USERS`
+[Back to Navigation](#navigation)
 
 ## Usage
 
@@ -189,6 +198,63 @@ The bot includes interactive buttons for common actions:
 /shutdown
 ```
 
+[Back to Navigation](#navigation)
+
+## Proper Shutdown Procedures
+
+Green-Boy offers multiple ways to properly shutdown the bot. It's important to use these methods rather than simply killing the process, as they ensure proper resource cleanup.
+
+### Method 1: Using the Shutdown Command
+
+The safest way to shutdown Green-Boy is using the built-in command:
+```
+/shutdown
+```
+This command:
+- Only works for authorized users
+- Provides a confirmation button
+- Properly releases all resources
+- Clears webhooks and connections
+
+### Method 2: Using Ctrl+C in Terminal
+
+If you're running the bot in a terminal, press `Ctrl+C` to initiate a graceful shutdown.
+
+### Method 3: Emergency Shutdown Script
+
+For cases where the bot is unresponsive or the above methods don't work, use the emergency shutdown script:
+
+```bash
+# Create the emergency shutdown script
+chmod +x emergency_shutdown.sh
+./emergency_shutdown.sh
+```
+
+This script:
+- Forcefully terminates all Green-Boy processes for your user
+- Cleans up lock files and resources
+- Verifies all processes are properly terminated
+
+### Method 4: Manual Process Killing
+
+As a last resort, you can manually find and kill the process:
+```bash
+# Find the process ID
+ps aux | grep "green-boy.py" | grep -v grep
+
+# Kill it forcefully
+kill -9 PROCESS_ID
+```
+
+### ⚠️ Important: After Shutdown
+
+After shutting down the bot, ensure these resources are cleaned up:
+1. No Green-Boy processes are still running
+2. The lock file is removed (`/tmp/greenboy-USERNAME.lock`)
+3. The socket port is freed
+
+[Back to Navigation](#navigation)
+
 ## Resource Monitoring
 
 Green-Boy provides comprehensive resource monitoring:
@@ -268,6 +334,28 @@ Additional security measures:
 
 ## Troubleshooting
 
+### API Conflict Issues
+
+If you encounter persistent Telegram API conflicts (error message: "Conflict: terminated by other getUpdates request"), follow these steps:
+
+1. **First, try the aggressive reset script:**
+   ```bash
+   chmod +x telegram_api_reset.sh
+   ./telegram_api_reset.sh
+   ```
+   This script performs a comprehensive reset of API connections and waits for them to fully settle.
+
+2. **If conflicts persist, create a new bot token:**
+   - Message [@BotFather](https://t.me/botfather) on Telegram
+   - Use the `/newbot` command to create a new bot
+   - Update your environment variable with the new token:
+   ```bash
+   export TELEGRAM_BOT_TOKEN="your_new_token_here"
+   ```
+   - Restart the bot with the new token
+
+3. **Important:** When the error "Conflict: terminated by other getUpdates request" persists despite cleanup attempts, it usually indicates the token has issues at Telegram's server side and creating a new bot is the most reliable solution.
+
 ### Bot Cleanup Tool
 
 If your bot isn't responding or you're getting webhook conflicts, use the included cleanup script:
@@ -328,6 +416,11 @@ python3 check_processes.py
 - Verify the bot has permissions to read job status
 - Ensure the bot is running continuously without interruptions
 
+**Shutdown button not working:**
+- If the bot is unresponsive and the shutdown button doesn't work
+- Use the emergency shutdown script or manually kill the process
+- If this occurs frequently, consider creating a new bot token
+
 ### Logging
 
 The bot logs activities to stdout. To save logs:
@@ -370,7 +463,14 @@ Please ensure compliance with your organization's policies when using on shared 
 
 ## Changelog
 
-### v1.3
+### v1.3.2
+- Added user-specific resource handling to prevent conflicts in shared environments
+- Created emergency shutdown script for unresponsive bots
+- Added aggressive API reset script for persistent Telegram conflicts
+- Improved error handling and recovery for API issues
+- Enhanced documentation for proper shutdown procedures
+
+### v1.3.1
 - Added exit status display for completed jobs
 - Added custom command functionality with `/custom` command
 - Enhanced job monitoring with improved notifications
