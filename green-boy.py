@@ -11,6 +11,8 @@ import asyncio
 import re
 import signal
 import time
+import json
+from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, CallbackQueryHandler
 from telegram.error import Conflict, NetworkError
@@ -27,12 +29,41 @@ AUTHORIZED_USERS = [int(user_id.strip()) for user_id in AUTH_USERS_STR.split(","
 # Max chars per message
 MAX_MESSAGE_LENGTH = 3500
 
+# File to persist monitored jobs across bot restarts
+MONITORED_JOBS_FILE = "monitored_jobs.json"
+
 # ─── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
+
+# ─── Job Monitoring System ─────────────────────────────────────────────────────
+
+# Storage for jobs being monitored (in-memory dictionary)
+# Format: {job_id: {"user_id": user_id, "chat_id": chat_id, "last_state": state}}
+MONITORED_JOBS = {}
+
+def save_monitored_jobs():
+    """Save monitored jobs to file"""
+    try:
+        with open(MONITORED_JOBS_FILE, 'w') as f:
+            json.dump(MONITORED_JOBS, f)
+    except Exception as e:
+        logger.error(f"Error saving monitored jobs: {e}")
+
+def load_monitored_jobs():
+    """Load monitored jobs from file"""
+    global MONITORED_JOBS
+    try:
+        with open(MONITORED_JOBS_FILE, 'r') as f:
+            MONITORED_JOBS = json.load(f)
+    except FileNotFoundError:
+        MONITORED_JOBS = {}
+    except Exception as e:
+        logger.error(f"Error loading monitored jobs: {e}")
+        MONITORED_JOBS = {}
 
 # ─── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -166,7 +197,7 @@ def get_job_resource_usage(job_id: str) -> dict:
         sacct_cmd = [
             "sacct",
             f"--jobs={job_id}",
-            "--format=JobID,State,ExitCode,AveCPU,MaxRSS,AveRSS,MaxVMSize,AveVMSize,CPUTime,ConsumedEnergy",
+            "--format=JobID,State,ExitCode,AveCPU,MaxRSS,AveRSS,MaxVMSize,AveVMSize,CPUTime,ConsumedEnergy,Elapsed",
             "-P"  # Parsable output
         ]
         
@@ -361,6 +392,172 @@ def paginate_lines(text: str, max_chars: int):
     if chunk:
         yield "\n".join(chunk)
 
+# ─── Job Monitoring Functions ─────────────────────────────────────────────────
+
+async def monitor_job(update: Update, context: ContextTypes.DEFAULT_TYPE, job_id: str):
+    """Add a job to the monitoring list"""
+    user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
+    
+    # Clean job ID to extract just the numeric part
+    clean_jobid = re.match(r'(\d+)', job_id)
+    if clean_jobid:
+        job_id = clean_jobid.group(1)
+    
+    # Check if job exists and get current state
+    job_details = get_job_details(job_id)
+    if "Error" in job_details:
+        await update.message.reply_text(f"❌ Cannot monitor job {job_id}: {job_details['Error']}")
+        return False
+    
+    current_state = job_details.get("JobState", "UNKNOWN")
+    
+    # Only monitor jobs that haven't completed yet
+    if current_state in ["COMPLETED", "CANCELLED", "FAILED", "TIMEOUT"]:
+        await update.message.reply_text(
+            f"⚠️ Job {job_id} has already finished (state: {current_state}). Cannot monitor."
+        )
+        return False
+    
+    # Add job to monitored list
+    MONITORED_JOBS[job_id] = {
+        "user_id": user_id,
+        "chat_id": chat_id,
+        "last_state": current_state,
+        "added_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    }
+    
+    # Save to file
+    save_monitored_jobs()
+    
+    await update.message.reply_text(
+        f"✅ Now monitoring job {job_id}. You'll be notified when it completes.\n"
+        f"Current state: {current_state}"
+    )
+    return True
+
+async def stop_monitoring_job(update: Update, context: ContextTypes.DEFAULT_TYPE, job_id: str):
+    """Remove a job from the monitoring list"""
+    user_id = update.effective_user.id
+    
+    # Clean job ID to extract just the numeric part
+    clean_jobid = re.match(r'(\d+)', job_id)
+    if clean_jobid:
+        job_id = clean_jobid.group(1)
+    
+    # Check if job is being monitored and user is authorized
+    if job_id not in MONITORED_JOBS:
+        await update.message.reply_text(f"❌ Job {job_id} is not being monitored.")
+        return False
+    
+    if MONITORED_JOBS[job_id]["user_id"] != user_id and not is_authorized(user_id):
+        await update.message.reply_text(f"⛔ You are not authorized to stop monitoring job {job_id}.")
+        return False
+    
+    # Remove job from monitored list
+    del MONITORED_JOBS[job_id]
+    
+    # Save to file
+    save_monitored_jobs()
+    
+    await update.message.reply_text(f"✅ Stopped monitoring job {job_id}.")
+    return True
+
+async def check_monitored_jobs(context: ContextTypes.DEFAULT_TYPE):
+    """Periodic task to check all monitored jobs"""
+    if not MONITORED_JOBS:
+        return
+    
+    # Copy the dict to avoid size changes during iteration
+    jobs_to_check = MONITORED_JOBS.copy()
+    
+    for job_id, job_info in jobs_to_check.items():
+        chat_id = job_info["chat_id"]
+        last_state = job_info["last_state"]
+        
+        # Get current job details
+        job_details = get_job_details(job_id)
+        
+        # Skip if error getting job details (could be temporary)
+        if "Error" in job_details:
+            logger.warning(f"Error checking job {job_id}: {job_details['Error']}")
+            continue
+        
+        current_state = job_details.get("JobState", "UNKNOWN")
+        
+        # Check if state has changed to a terminal state
+        if current_state != last_state and current_state in ["COMPLETED", "CANCELLED", "FAILED", "TIMEOUT"]:
+            # Get full job info including resource usage
+            resource_usage = get_job_resource_usage(job_id)
+            
+            # Prepare notification message
+            job_name = job_details.get("JobName", "Unknown")
+            notification = f"🔔 *Job Completed Notification*\n\n"
+            notification += f"*Job ID:* {job_id}\n"
+            notification += f"*Job Name:* {job_name}\n"
+            notification += f"*Final State:* {current_state}\n"
+            
+            # Include exit code if available
+            if "ExitCode" in resource_usage:
+                exit_code = resource_usage["ExitCode"]
+                notification += f"*Exit Code:* {exit_code}\n"
+                
+                # Add interpretation of exit code
+                if exit_code == "0:0":
+                    notification += "✅ *Job completed successfully*\n"
+                else:
+                    notification += "❌ *Job failed or had errors*\n"
+            
+            # Include runtime if available
+            if "Elapsed" in resource_usage:
+                notification += f"*Run Time:* {resource_usage['Elapsed']}\n"
+            elif "RunTime" in job_details:
+                notification += f"*Run Time:* {job_details['RunTime']}\n"
+            
+            # Include basic resource usage if available
+            notification += "\n*Resource Usage:*\n"
+            for resource_key in ["AveCPU", "MaxRSS", "ConsumedEnergy"]:
+                if resource_key in resource_usage:
+                    # Format the resource key (e.g., AveCPU -> Average CPU)
+                    formatted_key = resource_key
+                    if resource_key == "AveCPU":
+                        formatted_key = "Average CPU"
+                    elif resource_key == "MaxRSS":
+                        formatted_key = "Peak Memory"
+                    elif resource_key == "ConsumedEnergy":
+                        formatted_key = "Energy"
+                    
+                    notification += f"*{formatted_key}:* {resource_usage[resource_key]}\n"
+            
+            # Create keyboard with more info button
+            keyboard = [[
+                InlineKeyboardButton("📋 Detailed Job Info", callback_data=f"jobinfo_{job_id}")
+            ]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            # Send notification
+            try:
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=notification,
+                    parse_mode="Markdown",
+                    reply_markup=reply_markup
+                )
+                
+                # Remove job from monitored list
+                del MONITORED_JOBS[job_id]
+                save_monitored_jobs()
+                logger.info(f"Job {job_id} notification sent and removed from monitoring")
+                
+            except Exception as e:
+                logger.error(f"Error sending notification for job {job_id}: {e}")
+        
+        # Update last state for jobs that are still running
+        elif current_state != last_state:
+            MONITORED_JOBS[job_id]["last_state"] = current_state
+            save_monitored_jobs()
+            logger.info(f"Job {job_id} state updated to {current_state}")
+
 # ─── Command Handlers ─────────────────────────────────────────────────────────
 
 async def auth_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, callback):
@@ -395,12 +592,18 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/jobinfo <JOBID> - show detailed job information with resource usage\n"
         "/status - show overall cluster status\n"
         "/submit <script> - submit a job script\n"
+        "/monitor <JOBID> - monitor a job for completion notifications\n"
+        "/unmonitor <JOBID> - stop monitoring a job\n"
+        "/monitorlist - list all jobs being monitored\n"
+        "/custom <command> [args] - run a custom SLURM command\n"
         "/shutdown - safely shutdown the bot 🔒\n\n"
         "Examples:\n"
         "• `/squeue -p gpu` - jobs on the gpu partition\n"
         "• `/squeue -t PD` - pending jobs\n"
         "• `/cancel 60489632` - cancel job 60489632\n"
         "• `/jobinfo 60489632` - show details and resource usage for job 60489632\n"
+        "• `/monitor 60489632` - get notification when job completes\n"
+        "• `/custom sacct --jobs=60489632 --format=JobID,State,ExitCode -P` - custom SLURM command\n"
     )
     
     # Add shutdown button for authorized users
@@ -593,6 +796,19 @@ async def jobinfo_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         # Add energy consumption if available
         if "ConsumedEnergy" in resource_usage:
             info_text += f"*Energy Consumption:* {resource_usage['ConsumedEnergy']}\n"
+            
+        # Add exit code for completed jobs
+        if job_state in ["COMPLETED", "CANCELLED", "FAILED", "TIMEOUT"]:
+            if "ExitCode" in resource_usage:
+                exit_code = resource_usage['ExitCode']
+                info_text += f"*Exit Code:* {exit_code}\n"
+                
+                # Add interpretation of exit code
+                if exit_code == "0:0":
+                    info_text += "✅ *Job completed successfully*\n"
+                else:
+                    info_text += "❌ *Job failed or had errors*\n"
+                    
     elif job_state == "RUNNING":
         info_text += "\n*Resource Usage:*\n"
         info_text += "_Resource usage information not available. The job may have just started._\n"
@@ -602,6 +818,7 @@ async def jobinfo_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     
     # Add buttons
     keyboard = []
+    user_id = update.effective_user.id
     
     # First row: Cancel job button
     keyboard.append([InlineKeyboardButton("❌ Cancel Job", callback_data=f"cancel_{jobid}")])
@@ -609,6 +826,14 @@ async def jobinfo_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     # Second row: CPU and Memory button (for running jobs)
     if job_state == "RUNNING":
         keyboard.append([InlineKeyboardButton("📊 Detailed CPU & Memory", callback_data=f"cpu_mem_{jobid}")])
+    
+    # Add monitoring buttons if job is not completed
+    if job_state not in ["COMPLETED", "CANCELLED", "FAILED", "TIMEOUT"]:
+        # Check if job is being monitored
+        if jobid in MONITORED_JOBS and MONITORED_JOBS[jobid]["user_id"] == user_id:
+            keyboard.append([InlineKeyboardButton("🔕 Stop Monitoring", callback_data=f"unmonitor_{jobid}")])
+        else:
+            keyboard.append([InlineKeyboardButton("🔔 Monitor Completion", callback_data=f"monitor_{jobid}")])
     
     reply_markup = InlineKeyboardMarkup(keyboard)
     
@@ -664,9 +889,12 @@ async def submit_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         
         msg = f"✅ Job submitted successfully!\n{output}"
         
-        # Add keyboard to check job status
+        # Add keyboard with job status and monitoring buttons
         if job_id:
-            keyboard = [[InlineKeyboardButton("📋 Check Status", callback_data=f"jobinfo_{job_id}")]]
+            keyboard = [
+                [InlineKeyboardButton("📋 Check Status", callback_data=f"jobinfo_{job_id}")],
+                [InlineKeyboardButton("🔔 Monitor Completion", callback_data=f"monitor_{job_id}")]
+            ]
             reply_markup = InlineKeyboardMarkup(keyboard)
             await update.message.reply_text(msg, reply_markup=reply_markup)
         else:
@@ -711,6 +939,130 @@ async def shutdown_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         parse_mode="Markdown",
         reply_markup=reply_markup
     )
+
+# New monitoring commands
+async def monitor_command_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Authorization wrapper for monitor command"""
+    await auth_wrapper(update, context, monitor_command)
+
+async def monitor_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /monitor <JOBID> - Start monitoring a job for completion notification
+    """
+    if not context.args or len(context.args) < 1:
+        await update.message.reply_text("Usage: /monitor <JOBID>")
+        return
+    
+    job_id = context.args[0]
+    await monitor_job(update, context, job_id)
+
+async def unmonitor_command_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Authorization wrapper for unmonitor command"""
+    await auth_wrapper(update, context, unmonitor_command)
+
+async def unmonitor_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /unmonitor <JOBID> - Stop monitoring a job
+    """
+    if not context.args or len(context.args) < 1:
+        await update.message.reply_text("Usage: /unmonitor <JOBID>")
+        return
+    
+    job_id = context.args[0]
+    await stop_monitoring_job(update, context, job_id)
+
+async def monitorlist_command_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Authorization wrapper for monitorlist command"""
+    await auth_wrapper(update, context, monitorlist_command)
+
+async def monitorlist_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /monitorlist - List all jobs being monitored
+    """
+    user_id = update.effective_user.id
+    
+    # Filter jobs for this user (admins can see all)
+    user_jobs = {}
+    for job_id, job_info in MONITORED_JOBS.items():
+        if job_info["user_id"] == user_id or is_authorized(user_id):
+            user_jobs[job_id] = job_info
+    
+    if not user_jobs:
+        await update.message.reply_text("No jobs are currently being monitored.")
+        return
+    
+    # Generate list of monitored jobs
+    reply = "📋 *Monitored Jobs:*\n\n"
+    
+    for job_id, job_info in user_jobs.items():
+        # Get current job state
+        try:
+            job_details = get_job_details(job_id)
+            current_state = job_details.get("JobState", "UNKNOWN")
+            job_name = job_details.get("JobName", "Unknown")
+        except:
+            current_state = "Error"
+            job_name = "Unknown"
+        
+        reply += f"*Job ID:* {job_id}\n"
+        reply += f"*Name:* {job_name}\n"
+        reply += f"*Current State:* {current_state}\n"
+        reply += f"*Since:* {job_info.get('added_time', 'Unknown')}\n\n"
+    
+    # Add keyboard with monitor/unmonitor buttons
+    keyboard = []
+    if len(user_jobs) <= 5:  # Only show buttons if list is not too long
+        for job_id in user_jobs.keys():
+            keyboard.append([
+                InlineKeyboardButton(f"📋 Info: {job_id}", callback_data=f"jobinfo_{job_id}"),
+                InlineKeyboardButton(f"🛑 Stop: {job_id}", callback_data=f"unmonitor_{job_id}")
+            ])
+    
+    reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
+    await update.message.reply_text(reply, parse_mode="Markdown", reply_markup=reply_markup)
+
+# Custom command functionality
+async def custom_command_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Authorization wrapper for custom command"""
+    await auth_wrapper(update, context, custom_command)
+
+async def custom_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /custom <command> [args] - Run a custom SLURM command
+    
+    Only a whitelist of safe commands is allowed
+    """
+    if not context.args or len(context.args) < 1:
+        await update.message.reply_text(
+            "Usage: /custom <command> [args]\n\n"
+            "Allowed commands: sacct, sinfo, squeue, sstat, sprio\n"
+            "Example: `/custom sacct --jobs=12345 --format=JobID,State,ExitCode -P`"
+        )
+        return
+    
+    # Whitelist of safe commands
+    # Note: commands like srun, sbatch, scancel are excluded for safety
+    ALLOWED_COMMANDS = ["sacct", "sinfo", "squeue", "sstat", "sprio"]
+    
+    cmd = context.args[0].lower()
+    if cmd not in ALLOWED_COMMANDS:
+        await update.message.reply_text(
+            f"❌ Command '{cmd}' is not allowed.\n"
+            f"Allowed commands: {', '.join(ALLOWED_COMMANDS)}"
+        )
+        return
+    
+    # Build the command 
+    # Note: context.args[0] is the command, context.args[1:] are the arguments
+    slurm_cmd = [cmd] + context.args[1:]
+    
+    # Run the command
+    success, output = run_slurm_command(slurm_cmd)
+    
+    # Paginate if necessary
+    for i, chunk in enumerate(paginate_lines(output, MAX_MESSAGE_LENGTH)):
+        formatted = f"<pre>{chunk}</pre>"
+        await update.message.reply_text(formatted, parse_mode="HTML")
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle button callbacks from inline keyboards."""
@@ -812,6 +1164,16 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 error_msg,
                 parse_mode="Markdown"
             )
+    
+    # Handle monitoring buttons
+    elif data.startswith("monitor_"):
+        job_id = data.split("_")[1]
+        await monitor_job(update, context, job_id)
+    
+    # Handle unmonitor buttons
+    elif data.startswith("unmonitor_"):
+        job_id = data.split("_")[1]
+        await stop_monitoring_job(update, context, job_id)
     
     # Handle shutdown confirmation button
     elif data == "shutdown_confirm":
@@ -984,6 +1346,19 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             # Add energy consumption if available
             if "ConsumedEnergy" in resource_usage:
                 info_text += f"*Energy Consumption:* {resource_usage['ConsumedEnergy']}\n"
+                
+            # Add exit code for completed jobs
+            if job_state in ["COMPLETED", "CANCELLED", "FAILED", "TIMEOUT"]:
+                if "ExitCode" in resource_usage:
+                    exit_code = resource_usage['ExitCode']
+                    info_text += f"*Exit Code:* {exit_code}\n"
+                    
+                    # Add interpretation of exit code
+                    if exit_code == "0:0":
+                        info_text += "✅ *Job completed successfully*\n"
+                    else:
+                        info_text += "❌ *Job failed or had errors*\n"
+                        
         elif job_state == "RUNNING":
             info_text += "\n*Resource Usage:*\n"
             info_text += "_Resource usage information not available. The job may have just started._\n"
@@ -1000,6 +1375,14 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         # Second row: CPU and Memory button (for running jobs)
         if job_state == "RUNNING":
             keyboard.append([InlineKeyboardButton("📊 Detailed CPU & Memory", callback_data=f"cpu_mem_{job_id}")])
+        
+        # Add monitoring buttons if job is not completed
+        if job_state not in ["COMPLETED", "CANCELLED", "FAILED", "TIMEOUT"]:
+            # Check if job is being monitored
+            if job_id in MONITORED_JOBS and MONITORED_JOBS[job_id]["user_id"] == user_id:
+                keyboard.append([InlineKeyboardButton("🔕 Stop Monitoring", callback_data=f"unmonitor_{job_id}")])
+            else:
+                keyboard.append([InlineKeyboardButton("🔔 Monitor Completion", callback_data=f"monitor_{job_id}")])
         
         reply_markup = InlineKeyboardMarkup(keyboard)
         
@@ -1064,6 +1447,9 @@ def main():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     
+    # Load saved monitored jobs
+    load_monitored_jobs()
+    
     # More aggressive webhook cleanup
     max_cleanup_attempts = 5
     for attempt in range(max_cleanup_attempts):
@@ -1108,8 +1494,20 @@ def main():
             application.add_handler(CommandHandler("submit", submit_command_wrapper))
             application.add_handler(CommandHandler("shutdown", shutdown_command_wrapper))
             
+            # Register new monitoring command handlers
+            application.add_handler(CommandHandler("monitor", monitor_command_wrapper))
+            application.add_handler(CommandHandler("unmonitor", unmonitor_command_wrapper))
+            application.add_handler(CommandHandler("monitorlist", monitorlist_command_wrapper))
+            
+            # Register custom command handler
+            application.add_handler(CommandHandler("custom", custom_command_wrapper))
+            
             # Register callback query handler for buttons
             application.add_handler(CallbackQueryHandler(button_callback))
+            
+            # Set up the job monitoring background task
+            job_queue = application.job_queue
+            job_queue.run_repeating(check_monitored_jobs, interval=60, first=10)
             
             # Print startup message
             print("Green-Boy bot started successfully!")
