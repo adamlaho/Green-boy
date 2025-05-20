@@ -333,6 +333,18 @@ Please ensure compliance with your organization's policies when using on shared 
 
 ## Changelog
 
+
+### v1.2
+
+Added automatic job completion monitoring. New commands:
+/monitor <jobid> - Start monitoring a job
+/unmonitor <jobid> - Stop monitoring a job
+/monitorlist - Show all monitored jobs
+Background task checks job status every 60 seconds
+Sends notifications when jobs complete, including:
+Final job state
+Exit code with interpretation
+
 ### v1.1
 - Added remote shutdown functionality
 - Enhanced job cancellation with improved error handling
