@@ -4,6 +4,8 @@
 [![Python 3.7+](https://img.shields.io/badge/python-3.7+-blue.svg)](https://www.python.org/downloads/)
 [![SLURM](https://img.shields.io/badge/SLURM-compatible-brightgreen.svg)](https://slurm.schedmd.com/)
 
+# Green-Boy: SLURM Management via Telegram
+
 ## Navigation
 
 | [📋 Overview](#overview) | [🚀 Features](#features) | [⚙️ Installation](#installation) | [📝 Usage](#usage) | [🔍 Commands](#available-commands) |
@@ -75,7 +77,26 @@ This bot can perform destructive operations on your SLURM cluster, including:
 
 - Python 3.7+
 - Access to a SLURM cluster with command-line tools (`squeue`, `scontrol`, `sstat`, `sacct`, etc.)
-- A Telegram bot token (get one from [@BotFather](https://t.me/botfather))
+- A Telegram bot token (instructions below)
+
+### Creating a Telegram Bot
+
+1. **Open Telegram** and search for [@BotFather](https://t.me/botfather)
+2. **Start a chat** with BotFather and send the command `/newbot`
+3. **Follow the instructions** to name your bot:
+   - First provide a display name (e.g., "My SLURM Manager")
+   - Then provide a username that must end with "bot" (e.g., "my_slurm_manager_bot")
+4. **Save the API token** BotFather gives you - it looks like `123456789:ABCDefGhIJKlmNoPQRsTUVwxyZ`
+5. **Optional:** Customize your bot with `/setdescription`, `/setabouttext`, and `/setuserpic` commands
+
+### Finding Your Telegram User ID
+
+To restrict bot access to authorized users, you'll need your Telegram user ID:
+
+1. **Start a chat** with [@userinfobot](https://t.me/userinfobot) on Telegram
+2. **The bot will reply** with your information, including your User ID (a number like `123456789`)
+3. **Collect User IDs** from everyone who should have access to your bot
+4. **Use these IDs** in the `GREENBOY_AUTH_USERS` environment variable (see below)
 
 ### Setup
 
@@ -95,21 +116,20 @@ This bot can perform destructive operations on your SLURM cluster, including:
    python3 -m pip install -r requirements.txt
    ```
 
-3. **Create a Telegram bot**
-   - Message [@BotFather](https://t.me/botfather) on Telegram
-   - Use `/newbot` command and follow instructions
-   - Save the bot token
-
-4. **Configure environment variables**
+3. **Configure environment variables**
    ```bash
    export TELEGRAM_BOT_TOKEN="your_bot_token_here"
-   export GREENBOY_AUTH_USERS="123456789,987654321"  # Optional: comma-separated user IDs
+   export GREENBOY_AUTH_USERS="123456789,987654321"  # Comma-separated user IDs
    ```
 
-5. **Run the bot**
+4. **Run the bot**
    ```bash
    python3 green-boy.py
    ```
+
+5. **Start using your bot**
+   - Open Telegram and search for your bot's username
+   - Start a conversation and use `/start` to verify it's working
 
 [Back to Navigation](#navigation)
 
@@ -279,6 +299,8 @@ Green-Boy provides comprehensive resource monitoring:
 
 ### Using Screen or Tmux
 
+For keeping the bot running after you log out:
+
 ```bash
 # Using screen
 screen -S green-boy
@@ -291,7 +313,7 @@ tmux new-session -d -s green-boy 'python3 green-boy.py'
 
 ### Using Aliases (Quick Commands)
 
-You can also create convenient aliases for starting and stopping the bot:
+You can create convenient aliases for starting and stopping the bot:
 
 ```bash
 # Add these to your ~/.bashrc or ~/.zshrc
