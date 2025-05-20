@@ -31,17 +31,20 @@ This bot can perform destructive operations on your SLURM cluster, including:
 - Cancel running jobs
 - Submit new job scripts
 - Get detailed job information including resource usage
+- Monitor jobs for completion notifications
 
 📊 **Resource Monitoring**
 - Real-time CPU and memory usage for running jobs
 - Historical resource usage for completed jobs
 - Per-task resource breakdown
 - Energy consumption tracking
+- Exit status tracking and interpretation
 
 🖥️ **Cluster Information**
 - Overall cluster status and availability
 - Partition information
 - Node status
+- Custom SLURM command execution
 
 🔐 **Security**
 - User authorization system
@@ -118,6 +121,10 @@ To find your Telegram user ID:
 | `/jobinfo <JOBID>` | Show detailed job info with resource usage | `/jobinfo 12345678` |
 | `/status` | Show overall cluster status | `/status` |
 | `/submit <script>` | Submit a job script | `/submit /path/to/job.sh` |
+| `/monitor <JOBID>` | Monitor a job for completion notifications | `/monitor 12345678` |
+| `/unmonitor <JOBID>` | Stop monitoring a job | `/unmonitor 12345678` |
+| `/monitorlist` | List all jobs being monitored | `/monitorlist` |
+| `/custom <command> [args]` | Run a custom SLURM command | `/custom sacct --jobs=12345 --format=JobID,State,ExitCode -P` |
 | `/shutdown` | 🔴 Safely shutdown the bot (authorized users only) | `/shutdown` |
 
 ### Interactive Features
@@ -127,6 +134,7 @@ The bot includes interactive buttons for common actions:
 - **Queue Filters**: Quick buttons to filter jobs (All, Running, Pending, GPU)
 - **Job Actions**: Cancel jobs directly from job information
 - **Resource Details**: View detailed CPU and memory usage for running jobs
+- **Job Monitoring**: Monitor jobs for completion and get notifications
 - **Bot Management**: Shutdown button for authorized users
 
 ### Examples
@@ -161,6 +169,21 @@ The bot includes interactive buttons for common actions:
 /submit /home/user/my_job.sh
 ```
 
+**Monitor a job for completion:**
+```
+/monitor 12345678
+```
+
+**List all jobs being monitored:**
+```
+/monitorlist
+```
+
+**Run a custom SLURM command to check exit codes:**
+```
+/custom sacct --jobs=12345678 --format=JobID,State,ExitCode,Start,End,Elapsed -P
+```
+
 **Shutdown the bot remotely:**
 ```
 /shutdown
@@ -181,7 +204,14 @@ Green-Boy provides comprehensive resource monitoring:
 - Historical CPU usage
 - Peak memory usage
 - Total CPU time
-- Exit codes and job state
+- Exit codes with interpretation (success/failure)
+- Job duration and resource consumption
+
+### Job Completion Monitoring
+- Automatic notifications when jobs finish
+- Exit status and duration reporting
+- Resource usage summary
+- Direct links to detailed job information
 
 ## Deployment
 
@@ -229,6 +259,7 @@ ps aux | grep green-boy.py
 - **Secure your token**: Keep your `TELEGRAM_BOT_TOKEN` secret
 - **Test permissions**: Ensure bot users only have appropriate SLURM access
 - **Network security**: Consider firewall restrictions and VPN access
+- **Custom command limitations**: Only whitelisted SLURM commands are allowed via `/custom`
 
 Additional security measures:
 - **Permissions**: The bot runs with the permissions of the user executing it
@@ -292,6 +323,11 @@ python3 check_processes.py
 - Wait before restarting the bot
 - Check for multiple bot instances
 
+**Job monitoring issues:**
+- Check if the monitored jobs file (`monitored_jobs.json`) is writable
+- Verify the bot has permissions to read job status
+- Ensure the bot is running continuously without interruptions
+
 ### Logging
 
 The bot logs activities to stdout. To save logs:
@@ -322,6 +358,7 @@ Feel free to submit issues, feature requests, or pull requests. Some areas for i
 - Email notifications integration
 - Web dashboard
 - Enhanced security features
+- Extended job monitoring capabilities
 
 ## License
 
@@ -333,17 +370,23 @@ Please ensure compliance with your organization's policies when using on shared 
 
 ## Changelog
 
+### v1.3
+- Added exit status display for completed jobs
+- Added custom command functionality with `/custom` command
+- Enhanced job monitoring with improved notifications
+- Added exit code interpretation (success/failure indicators)
+- Added persistence for monitored jobs across bot restarts
 
 ### v1.2
-
-Added automatic job completion monitoring. New commands:
-/monitor <jobid> - Start monitoring a job
-/unmonitor <jobid> - Stop monitoring a job
-/monitorlist - Show all monitored jobs
-Background task checks job status every 60 seconds
-Sends notifications when jobs complete, including:
-Final job state
-Exit code with interpretation
+- Added automatic job completion monitoring
+- New commands:
+  - `/monitor <jobid>` - Start monitoring a job
+  - `/unmonitor <jobid>` - Stop monitoring a job
+  - `/monitorlist` - Show all monitored jobs
+- Background task checks job status every 60 seconds
+- Sends notifications when jobs complete, including:
+  - Final job state
+  - Exit code with interpretation
 
 ### v1.1
 - Added remote shutdown functionality
