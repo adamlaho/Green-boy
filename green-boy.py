@@ -24,9 +24,18 @@ BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 if not BOT_TOKEN:
     raise RuntimeError("Environment variable TELEGRAM_BOT_TOKEN is not set")
 
-# Optional authorized users (comma-separated list of user IDs)
+# Required authorized users (comma-separated list of user IDs)
 AUTH_USERS_STR = os.getenv("GREENBOY_AUTH_USERS", "")
+if not AUTH_USERS_STR:
+    print("ERROR: For security reasons, please provide your User ID by setting the GREENBOY_AUTH_USERS environment variable.")
+    print("Example: export GREENBOY_AUTH_USERS=123456789")
+    sys.exit(1)
+
 AUTHORIZED_USERS = [int(user_id.strip()) for user_id in AUTH_USERS_STR.split(",") if user_id.strip()]
+if not AUTHORIZED_USERS:
+    print("ERROR: No valid user IDs found in GREENBOY_AUTH_USERS. Please provide at least one valid numeric user ID.")
+    print("Example: export GREENBOY_AUTH_USERS=123456789")
+    sys.exit(1)
 
 # Max chars per message
 MAX_MESSAGE_LENGTH = 3500
@@ -410,9 +419,7 @@ def load_monitored_jobs():
 
 def is_authorized(user_id):
     """Check if a user is authorized to use the bot."""
-    # If no authorized users are configured, allow all users
-    if not AUTHORIZED_USERS:
-        return True
+    # Authorization is strictly enforced - only listed users can access
     return user_id in AUTHORIZED_USERS
 
 def run_slurm_command(cmd: list[str]) -> tuple[bool, str]:
@@ -924,6 +931,15 @@ async def monitor_job(update: Update, context: ContextTypes.DEFAULT_TYPE, job_id
     user_id = update.effective_user.id
     chat_id = update.effective_chat.id
     
+    # Ensure user is authorized
+    if not is_authorized(user_id):
+        if update.callback_query:
+            await update.callback_query.answer("⛔ Not authorized")
+            await update.callback_query.edit_message_text("⛔ You are not authorized to monitor jobs.")
+        else:
+            await update.message.reply_text("⛔ You are not authorized to monitor jobs.")
+        return False
+    
     # Clean job ID to extract just the numeric part
     clean_jobid = re.match(r'(\d+)', job_id)
     if clean_jobid:
@@ -984,6 +1000,15 @@ async def monitor_job(update: Update, context: ContextTypes.DEFAULT_TYPE, job_id
 async def stop_monitoring_job(update: Update, context: ContextTypes.DEFAULT_TYPE, job_id: str):
     """Remove a job from the monitoring list"""
     user_id = update.effective_user.id
+    
+    # Ensure user is authorized
+    if not is_authorized(user_id):
+        if update.callback_query:
+            await update.callback_query.answer("⛔ Not authorized")
+            await update.callback_query.edit_message_text("⛔ You are not authorized to stop monitoring jobs.")
+        else:
+            await update.message.reply_text("⛔ You are not authorized to stop monitoring jobs.")
+        return False
     
     # Clean job ID to extract just the numeric part
     clean_jobid = re.match(r'(\d+)', job_id)
@@ -1125,7 +1150,7 @@ async def auth_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, callb
     user_id = update.effective_user.id
     if not is_authorized(user_id):
         await update.message.reply_text(
-            "⛔ You are not authorized to use this bot. Contact the administrator."
+            "⛔ You are not authorized to use this bot. Contact the administrator to add your User ID to the GREENBOY_AUTH_USERS environment variable."
         )
         logger.warning(f"Unauthorized access attempt by user {user_id}")
         return
@@ -1134,6 +1159,15 @@ async def auth_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, callb
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Welcome message when /start is used"""
+    user_id = update.effective_user.id
+    if not is_authorized(user_id):
+        await update.message.reply_text(
+            f"⛔ You are not authorized to use this bot. Your User ID is {user_id}.\n\n"
+            f"Please contact the administrator to add your ID to the GREENBOY_AUTH_USERS environment variable."
+        )
+        logger.warning(f"Unauthorized access attempt by user {user_id}")
+        return
+        
     await update.message.reply_text(
         "👋 Hello! I'm Green-Boy, your SLURM job monitoring assistant.\n\n"
         "Use /squeue to list your jobs or /help for more commands."
@@ -1141,6 +1175,16 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Display help information when /help is used"""
+    # Check authorization
+    user_id = update.effective_user.id
+    if not is_authorized(user_id):
+        await update.message.reply_text(
+            f"⛔ You are not authorized to use this bot. Your User ID is {user_id}.\n\n"
+            f"Please contact the administrator to add your ID to the GREENBOY_AUTH_USERS environment variable."
+        )
+        logger.warning(f"Unauthorized access attempt by user {user_id}")
+        return
+        
     help_text = (
         "📖 *Available commands:*\n"
         "/start - say hello\n"
@@ -1168,7 +1212,6 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     
     # Add shutdown button for authorized users
     keyboard = []
-    user_id = update.effective_user.id
     if is_authorized(user_id):
         keyboard.append([InlineKeyboardButton("🔴 Shutdown Bot", callback_data="shutdown_confirm")])
     
@@ -1670,7 +1713,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     # Check authorization
     user_id = update.effective_user.id
     if not is_authorized(user_id):
-        await query.edit_message_text("⛔ You are not authorized to use this bot.")
+        await query.edit_message_text(
+            f"⛔ You are not authorized to use this bot. Your User ID is {user_id}.\n\n"
+            f"Please contact the administrator to add your ID to the GREENBOY_AUTH_USERS environment variable."
+        )
         return
     
     data = query.data
@@ -2126,6 +2172,14 @@ def main():
         print("ERROR: Invalid bot token. Please set TELEGRAM_BOT_TOKEN environment variable.")
         return 1
     
+    # Check for authorized users
+    if not AUTHORIZED_USERS:
+        print("ERROR: No authorized users specified. For security reasons, please set GREENBOY_AUTH_USERS")
+        print("Example: export GREENBOY_AUTH_USERS=123456789")
+        return 1
+    else:
+        print(f"Authorized user IDs: {AUTHORIZED_USERS}")
+        
     # Kill any existing processes first
     killed_processes = kill_running_bot_processes()
     if killed_processes > 0:
@@ -2219,7 +2273,7 @@ def main():
             
             # Print startup message
             print("Green-Boy bot started successfully!")
-            print(f"Authorized users: {AUTHORIZED_USERS if AUTHORIZED_USERS else 'All users allowed'}")
+            print(f"Authorized users: {AUTHORIZED_USERS}")
             print(f"Running with PID: {os.getpid()}")
             print("Press Ctrl+C to stop the bot")
             
@@ -2290,4 +2344,4 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())#!/usr/bin/env python3
+    sys.exit(main())
