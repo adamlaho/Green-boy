@@ -14,6 +14,8 @@
 
 Green-Boy is a Telegram bot that makes SLURM cluster monitoring and job management easy and accessible from your mobile device or desktop. Monitor your jobs, receive notifications when they complete, check resource usage, and manage your workload - all through a simple chat interface.
 
+> 🔒 **SECURITY REQUIREMENT**: For security reasons, Green-Boy **requires** your Telegram user ID to be set in the `GREENBOY_AUTH_USERS` environment variable (preferably in your `.bashrc`). The bot will not run without this configuration. See the [Installation](#installation) and [Security](#security-considerations) sections for details.
+
 ⚠️ **IMPORTANT DISCLAIMER**
 
 **USE AT YOUR OWN RISK**
@@ -114,11 +116,25 @@ To restrict bot access to authorized users, you'll need your Telegram user ID:
    python3 -m pip install -r requirements.txt
    ```
 
-3. **Configure environment variables**
+3. **Configure environment variables in .bashrc (STRONGLY RECOMMENDED FOR SECURITY)**
+
+   Edit your .bashrc file:
+   ```bash
+   nano ~/.bashrc
+   ```
+
+   Add these lines at the end of the file:
    ```bash
    export TELEGRAM_BOT_TOKEN="your_bot_token_here"
    export GREENBOY_AUTH_USERS="123456789,987654321"  # Comma-separated user IDs
    ```
+
+   Apply the changes:
+   ```bash
+   source ~/.bashrc
+   ```
+
+   > ⚠️ **SECURITY WARNING**: The `GREENBOY_AUTH_USERS` setting is **mandatory** and not optional. For security reasons, Green-Boy will refuse to start if no user IDs are provided. This prevents unauthorized access to your SLURM cluster.
 
 4. **Run the bot**
    ```bash
@@ -335,15 +351,29 @@ ps aux | grep green-boy.py
 
 ## Security Considerations
 
-⚠️ **Critical Security Notice:**
-- **Always configure authorization**: Set `GREENBOY_AUTH_USERS` to restrict access
-- **Monitor bot usage**: Review logs regularly for unauthorized access
-- **Secure your token**: Keep your `TELEGRAM_BOT_TOKEN` secret
+🔒 **CRITICAL SECURITY REQUIREMENT: USER AUTHORIZATION**
+
+For security reasons, Green-Boy **requires** all users to be explicitly authorized:
+
+1. **You MUST add your Telegram User ID** to the `GREENBOY_AUTH_USERS` environment variable in your `.bashrc`:
+   ```bash
+   # In ~/.bashrc (MANDATORY - bot won't start without this)
+   export GREENBOY_AUTH_USERS="your_telegram_user_id"
+   ```
+
+2. **The bot will refuse to start** if no authorized users are specified
+
+3. **This is not optional** - this security measure prevents unauthorized access to your SLURM environment and ensures only known users can access your computational resources
+
+4. **Permanent Setup**: Setting this in your `.bashrc` ensures the security setting persists across sessions and system reboots
+
+Additional security measures:
+
+- **Keep your bot token secure**: Store it safely in your `.bashrc`
+- **Monitor bot usage**: Review logs regularly for unusual activity
 - **Test permissions**: Ensure bot users only have appropriate SLURM access
 - **Network security**: Consider firewall restrictions and VPN access
 - **Custom command limitations**: Only whitelisted SLURM commands are allowed via `/custom`
-
-Additional security measures:
 - **Permissions**: The bot runs with the permissions of the user executing it
 - **Logs**: Monitor logs for unauthorized access attempts
 - **Cluster coordination**: Inform cluster administrators about bot deployment
@@ -371,6 +401,28 @@ If you encounter persistent Telegram API conflicts (error message: "Conflict: te
    - Restart the bot with the new token
 
 3. **Important:** When the error "Conflict: terminated by other getUpdates request" persists despite cleanup attempts, it usually indicates the token has issues at Telegram's server side and creating a new bot is the most reliable solution.
+
+### Authorization Issues
+
+When you see the error:
+```
+ERROR: For security reasons, please provide your User ID by setting the GREENBOY_AUTH_USERS environment variable.
+```
+
+This is intentional and required. Add your Telegram User ID to your `.bashrc`:
+
+```bash
+# Edit .bashrc
+nano ~/.bashrc
+
+# Add this line (replace with your actual user ID)
+export GREENBOY_AUTH_USERS="123456789"
+
+# Apply changes
+source ~/.bashrc
+```
+
+Don't know your User ID? Run the bot once without the environment variable set and try to use it - the error message will show your ID.
 
 ### Bot Cleanup Tool
 
@@ -448,7 +500,7 @@ python3 green-boy.py > green-boy.log 2>&1
 
 - **Python**: 3.7+
 - **Python packages**:
-  - `python-telegram-bot`
+  - `python-telegram-bot[job-queue]`
   - `requests`
   - `psutil` (for process management)
 - **System tools**:
@@ -477,6 +529,7 @@ Feel free to submit issues, feature requests, or pull requests. Some areas for i
 - Added aggressive API reset script for persistent Telegram conflicts
 - Improved error handling and recovery for API issues
 - Enhanced documentation for proper shutdown procedures
+- **Added mandatory user authorization for improved security**
 
 ### v1.3.1
 - Added exit status display for completed jobs
