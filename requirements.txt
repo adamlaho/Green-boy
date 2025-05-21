@@ -1,14 +1,14 @@
-# Green-Boy SLURM Telegram Bot Requirements
-# Core dependencies for the bot functionality
+# Green-Boy SLURM Telegram Bot - Requirements
+# Core dependencies
+python-telegram-bot[job-queue]>=20.0,<21.0  # Telegram Bot API framework with job queue support
+requests>=2.28.0  # HTTP requests for webhook management and API calls
 
-# Telegram Bot API framework (async version)
-python-telegram-bot>=20.0,<21.0
+# Performance enhancements
+httpx>=0.24.0  # Modern HTTP client with async support
+uvloop>=0.17.0; sys_platform != "win32"  # Fast asyncio event loop implementation (non-Windows)
+orjson>=3.9.0  # Fast JSON library
 
-# HTTP requests library for API calls
-requests>=2.25.0
+# Logging and monitoring
+coloredlogs>=15.0  # Colored terminal output for logs
+rich>=13.0.0  # Rich text and formatting in terminal
 
-# Optional: For better async performance (recommended)
-httpx>=0.24.0
-
-# Optional: For enhanced logging and monitoring
-coloredlogs>=15.0
